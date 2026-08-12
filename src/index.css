@@ -1,0 +1,137 @@
+/* ============================================================
+   アクアビーズアートマスター — デザイントークンとベース
+   コンセプト: 「静かな工房」 — 余白と精度、主役はビーズの色
+   ============================================================ */
+
+:root {
+  /* 色 */
+  --bg: #f6f5f3;
+  --surface: #ffffff;
+  --ink: #1d1d1f;
+  --ink-secondary: #6e6e73;
+  --ink-tertiary: #a1a1a6;
+  --hairline: rgba(0, 0, 0, 0.08);
+  --hairline-strong: rgba(0, 0, 0, 0.14);
+  --track: #e8e8ed;
+  --accent: #0071e3; /* macOS blue */
+  --success: #34c759; /* iOS green */
+
+  /* タイポグラフィ */
+  --font-jp: 'Zen Kaku Gothic New', -apple-system, 'Hiragino Sans', 'Yu Gothic UI', sans-serif;
+  --font-num: 'Outfit', -apple-system, sans-serif;
+
+  /* 形 */
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 10px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 32px rgba(0, 0, 0, 0.05);
+  --shadow-float: 0 2px 8px rgba(0, 0, 0, 0.08), 0 16px 48px rgba(0, 0, 0, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-jp);
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.7;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img,
+canvas,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+input {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(0, 113, 227, 0.18);
+}
+
+/* 画面表示時は印刷用シートを隠す */
+.print-only {
+  display: none;
+}
+
+/* ============================================================
+   印刷: 原寸シートのみを出力する
+   ============================================================ */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  .app {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block;
+  }
+}
+
+/* 印刷シートの構成要素（印刷時のみ表示される） */
+.print-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 10pt;
+  margin-bottom: 4mm;
+  gap: 8mm;
+}
+
+.print-header span {
+  font-size: 8pt;
+  color: #555;
+}
+
+.print-legend {
+  margin-top: 6mm;
+  border-collapse: collapse;
+  font-size: 8pt;
+}
+
+.print-legend td {
+  padding: 0.6mm 2mm 0.6mm 0;
+  vertical-align: middle;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 4mm;
+  height: 4mm;
+  border-radius: 50%;
+  border: 0.2mm solid rgba(0, 0, 0, 0.25);
+}
+
+.legend-count {
+  font-variant-numeric: tabular-nums;
+}
