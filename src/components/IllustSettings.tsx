@@ -55,7 +55,7 @@ export function IllustSettings({ options, onChange, segError }: Props) {
           自動は被写体を AI で切り抜き（初回はモデル約4.5MBを読み込み）。単色背景は四隅の色を背景とみなします。
           背景はビーズを置かない「空きマス」になります。
         </p>
-        {segError && (
+        {segError && options.background === 'auto' && (
           <p className="field-hint" style={{ color: '#b25000' }}>
             AI モデルを読み込めなかったため、背景除去なしで表示しています。
           </p>

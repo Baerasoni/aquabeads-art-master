@@ -42,7 +42,12 @@ function loadOwnedIds(): Set<string> {
 }
 
 export default function App() {
-  const [source, setSource] = useState<{ bitmap: ImageBitmap; name: string } | null>(null)
+  const [source, setSource] = useState<{
+    bitmap: ImageBitmap
+    name: string
+    seq: number
+  } | null>(null)
+  const seqRef = useRef(0)
   const [sourceUrl, setSourceUrl] = useState('')
   const [imageData, setImageData] = useState<ImageLike | null>(null)
   const [spec, setSpec] = useState<GridSpec>(STANDARD_TRAY)
@@ -58,6 +63,9 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [segError, setSegError] = useState(false)
   const runId = useRef(0)
+  // AI マスクは (画像, 調整) に対して決定的なのでキャッシュし、
+  // ベタ塗り・輪郭など後段オプションの変更で推論が再実行されないようにする
+  const maskCache = useRef<{ key: string; mask: Float32Array } | null>(null)
 
   // 手持ち色の永続化
   useEffect(() => {
@@ -66,11 +74,13 @@ export default function App() {
 
   // 画像 + 調整 + イラスト化 → ImageLike（前処理パイプライン）
   useEffect(() => {
+    // source クリアを含むあらゆる変更で進行中の run を無効化する
+    const id = ++runId.current
     if (!source) {
       setImageData(null)
+      setBusy(false)
       return
     }
-    const id = ++runId.current
     const run = async () => {
       setBusy(true)
       try {
@@ -89,14 +99,21 @@ export default function App() {
         let img: ImageLike = ctx.getImageData(0, 0, w, h)
 
         if (illust.background === 'auto') {
-          try {
-            const mask = await segmentSubject(img)
-            if (runId.current !== id) return
-            applyMask(img, mask)
-            setSegError(false)
-          } catch {
-            setSegError(true)
+          const key = `${source.seq}:${adjust.brightness}:${adjust.contrast}:${adjust.saturation}`
+          let mask = maskCache.current?.key === key ? maskCache.current.mask : null
+          if (!mask) {
+            try {
+              if (runId.current !== id) return
+              mask = await segmentSubject(img)
+              maskCache.current = { key, mask }
+              if (runId.current === id) setSegError(false)
+            } catch {
+              if (runId.current === id) setSegError(true)
+              mask = null
+            }
           }
+          if (runId.current !== id) return
+          if (mask) applyMask(img, mask)
         } else if (illust.background === 'simple') {
           img = removeBackgroundSimple(img)
         }
@@ -110,7 +127,9 @@ export default function App() {
       }
     }
     run()
-  }, [source, adjust, illust])
+    // outline / outlineStrength は quantizeOptions 側でのみ使うため依存に含めない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, adjust, illust.background, illust.autoZoom, illust.smooth, illust.posterize, illust.colors])
 
   // サムネイル URL
   useEffect(() => {
@@ -191,7 +210,9 @@ export default function App() {
                   )
                 })}
               </div>
-              <ImageDropzone onImage={(bitmap, name) => setSource({ bitmap, name })} />
+              <ImageDropzone
+                onImage={(bitmap, name) => setSource({ bitmap, name, seq: ++seqRef.current })}
+              />
             </div>
           ) : (
             <>

@@ -199,6 +199,22 @@ describe('imageToPattern', () => {
     expect(pattern.cells[25][21]).toBe(-1)
   })
 
+  // 極小画像のフォールバック採色は座標を含む画素（floor）を読む（round だと右下にずれる）
+  it('極小画像: 画素(0,0)だけ不透明 → セル(0,0)にビーズが置かれる', () => {
+    const image: ImageLike = {
+      width: 12,
+      height: 12,
+      data: new Uint8ClampedArray(12 * 12 * 4),
+    }
+    image.data[0] = 231
+    image.data[1] = 0
+    image.data[2] = 18
+    image.data[3] = 255
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE)
+    expect(pattern.cells[0][0]).toBeGreaterThanOrEqual(0)
+    expect(pattern.palette[pattern.cells[0][0]].name).toBe('あか')
+  })
+
   it('半透明（alpha 50%）のベタは空きマスにならず白と合成される', () => {
     const image = solidImage(60, 60, [231, 0, 18])
     for (let i = 3; i < image.data.length; i += 4) image.data[i] = 128

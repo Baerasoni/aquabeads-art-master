@@ -181,10 +181,12 @@ function sampleCell(
     }
   }
   if (total === 0) {
-    const px = Math.min(image.width - 1, Math.max(0, Math.round(cx)))
-    const py = Math.min(image.height - 1, Math.max(0, Math.round(cy)))
+    // 画素 i は [i, i+1) を占めるため、座標を含む画素は floor（round だと右下にずれる）
+    const px = Math.min(image.width - 1, Math.max(0, Math.floor(cx)))
+    const py = Math.min(image.height - 1, Math.max(0, Math.floor(cy)))
     const idx = py * image.width + px
     total = 1
+    if (edgeMag && edgeMag[idx] >= STRONG_EDGE) strongEdges = 1
     if (image.data[idx * 4 + 3] >= 128) {
       opaque = 1
       pixels.push(compositeWhite(image.data, idx * 4))

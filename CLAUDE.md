@@ -19,12 +19,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 処理パイプライン（すべてブラウザ内、`src/lib/` は UI 非依存の純関数）:
 
 ```
-File → createImageBitmap → canvas 描画 → ImageData
-     → 六角セル中心ごとに周辺画素を集約 (lib/grid.ts)
-     → CIELAB 最近傍色マッピング (lib/colorspace.ts, lib/quantize.ts)
+File → createImageBitmap → canvas 描画（明るさ等の filter・最大640px） → ImageData
+     → [背景除去: AI (src/segmentation.ts) or 簡易 (lib/preprocess.ts)] → alpha に反映
+     → [被写体ズーム cropToSubject] → [Kuwahara 平滑化] → [k-means 減色]
+     → 六角セル中心ごとに周辺画素を集約 (lib/grid.ts, lib/quantize.ts)
+        - 不透明率 < 0.35 のセルは EMPTY_CELL(-1) = 空きマス
+        - 輪郭オプション: エッジ密度 or 空きマス隣接セルを最暗色に
+     → CIELAB 最近傍色マッピング (lib/colorspace.ts)
      → Pattern（行ごとに長さの異なる配列の配列, lib/pattern.ts）
      → 図案表示 / ビーズ数集計 / 印刷（src/components/）
 ```
+
+- AI 背景除去は `onnxruntime-web/wasm` エントリを使うこと（デフォルトエントリは jsep 版 wasm を
+  要求し、public/ort/ に置いた非 jsep 版と一致せず失敗する）
+- モデル public/models/u2netp.onnx（rembg 配布, U²-Net Apache-2.0）と wasm ランタイム public/ort/ は自前ホスト
 
 - 状態管理は React 標準（useState/useReducer）。状態ライブラリは使わない
 - テストは `lib/` の純関数を対象にする。UI コンポーネントのテストは書いていない

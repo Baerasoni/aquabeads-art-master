@@ -1,6 +1,6 @@
 import { BEAD_DIAMETER_MM, cellCenterMm, gridHeightMm, gridWidthMm } from '../lib/grid'
 import type { Pattern } from '../lib/pattern'
-import { countBeads, totalBeads } from '../lib/pattern'
+import { countBeads, emptyCellCount, totalBeads } from '../lib/pattern'
 
 interface Props {
   pattern: Pattern
@@ -19,13 +19,15 @@ export function PrintSheet({ pattern }: Props) {
   // 公式シートの位置マーカーと同じ直径4mmの円で印刷する
   const markR = 2
   const counts = countBeads(pattern)
+  const empty = emptyCellCount(pattern)
 
   return (
     <div className="print-only print-sheet">
       <div className="print-header">
         <strong>アクアビーズアートマスター</strong>
         <span>
-          {spec.cols}×{spec.rows}（{totalBeads(pattern)}個） ・ 原寸（倍率100%で印刷）
+          {spec.cols}×{spec.rows}（{totalBeads(pattern)}個
+          {empty > 0 ? ` ・ 空きマス ${empty}` : ''}） ・ 原寸（倍率100%で印刷）
         </span>
       </div>
 

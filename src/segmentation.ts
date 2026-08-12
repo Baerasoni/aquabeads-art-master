@@ -44,13 +44,16 @@ function resizeBilinear(
 ): Float32Array {
   const dst = new Float32Array(dw * dh)
   for (let y = 0; y < dh; y++) {
-    const fy = ((y + 0.5) * sh) / dh - 0.5
-    const y0 = Math.max(0, Math.floor(fy))
+    // 端で外挿しないよう補間座標そのものをクランプする（重みを [0,1] に保つ）
+    let fy = ((y + 0.5) * sh) / dh - 0.5
+    fy = Math.max(0, Math.min(sh - 1, fy))
+    const y0 = Math.floor(fy)
     const y1 = Math.min(sh - 1, y0 + 1)
     const ty = fy - y0
     for (let x = 0; x < dw; x++) {
-      const fx = ((x + 0.5) * sw) / dw - 0.5
-      const x0 = Math.max(0, Math.floor(fx))
+      let fx = ((x + 0.5) * sw) / dw - 0.5
+      fx = Math.max(0, Math.min(sw - 1, fx))
+      const x0 = Math.floor(fx)
       const x1 = Math.min(sw - 1, x0 + 1)
       const tx = fx - x0
       const a = src[y0 * sw + x0]
@@ -84,18 +87,32 @@ export async function segmentSubject(image: ImageLike): Promise<Float32Array> {
   smallCtx.drawImage(srcCanvas, 0, 0, MODEL_SIZE, MODEL_SIZE)
   const d = smallCtx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data
 
-  // ImageNet 正規化（透明画素は白として扱う）
+  // ImageNet 正規化（透明画素は白として扱う）。
+  // rembg 準拠で除数は 255 固定ではなく画像内最大画素値（露出アンダー画像でのマスク崩壊を防ぐ）
   const n = MODEL_SIZE * MODEL_SIZE
-  const input = new Float32Array(3 * n)
-  const mean = [0.485, 0.456, 0.406]
-  const std = [0.229, 0.224, 0.225]
+  const comp = new Float32Array(3 * n)
+  let maxV = 1e-6
   for (let i = 0; i < n; i++) {
     const p = i * 4
     const a = d[p + 3] / 255
     const w = 255 * (1 - a)
-    input[i] = ((d[p] * a + w) / 255 - mean[0]) / std[0]
-    input[n + i] = ((d[p + 1] * a + w) / 255 - mean[1]) / std[1]
-    input[2 * n + i] = ((d[p + 2] * a + w) / 255 - mean[2]) / std[2]
+    const r = d[p] * a + w
+    const g = d[p + 1] * a + w
+    const b = d[p + 2] * a + w
+    comp[i] = r
+    comp[n + i] = g
+    comp[2 * n + i] = b
+    if (r > maxV) maxV = r
+    if (g > maxV) maxV = g
+    if (b > maxV) maxV = b
+  }
+  const input = new Float32Array(3 * n)
+  const mean = [0.485, 0.456, 0.406]
+  const std = [0.229, 0.224, 0.225]
+  for (let i = 0; i < n; i++) {
+    input[i] = (comp[i] / maxV - mean[0]) / std[0]
+    input[n + i] = (comp[n + i] / maxV - mean[1]) / std[1]
+    input[2 * n + i] = (comp[2 * n + i] / maxV - mean[2]) / std[2]
   }
 
   const tensor = new ort.Tensor('float32', input, [1, 3, MODEL_SIZE, MODEL_SIZE])

@@ -54,10 +54,12 @@ export function kuwahara(image: ImageLike, radius = 2): ImageLike {
             const xx = x + dx
             if (xx < 0 || xx >= w) continue
             const i = yy * w + xx
+            const p = i * 4
+            // 透明画素の「隠れ RGB」（背景除去後に残る背景色）を混入させない
+            if (src[p + 3] < 128) continue
             const l = luma[i]
             sum += l
             sum2 += l * l
-            const p = i * 4
             r += src[p]
             g += src[p + 1]
             b += src[p + 2]
@@ -75,9 +77,16 @@ export function kuwahara(image: ImageLike, radius = 2): ImageLike {
         }
       }
       const p = (y * w + x) * 4
-      dst[p] = bR
-      dst[p + 1] = bG
-      dst[p + 2] = bB
+      if (bestVar === Infinity) {
+        // 全象限が透明画素のみ: 元の画素をそのまま出力
+        dst[p] = src[p]
+        dst[p + 1] = src[p + 1]
+        dst[p + 2] = src[p + 2]
+      } else {
+        dst[p] = bR
+        dst[p + 1] = bG
+        dst[p + 2] = bB
+      }
       dst[p + 3] = src[p + 3]
     }
   }
@@ -117,7 +126,7 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
   }
 
   const assign = new Array<number>(samples.length).fill(0)
-  for (let iter = 0; iter < maxIter; iter++) {
+  const assignAll = () => {
     let changed = false
     for (let s = 0; s < samples.length; s++) {
       const lab = samples[s].lab
@@ -138,7 +147,10 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
         changed = true
       }
     }
-    if (!changed) break
+    return changed
+  }
+  for (let iter = 0; iter < maxIter; iter++) {
+    if (!assignAll()) break
     const acc = Array.from({ length: k }, () => ({ L: 0, a: 0, b: 0, n: 0 }))
     for (let s = 0; s < samples.length; s++) {
       const a = acc[assign[s]]
@@ -153,6 +165,8 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
       }
     }
   }
+  // maxIter 到達時はセントロイド更新が最終代入より後になるため、最終状態で取り直す
+  assignAll()
 
   // 各クラスタの代表 RGB（クラスタ内平均）
   const rgbAcc = Array.from({ length: k }, () => ({ r: 0, g: 0, b: 0, n: 0 }))
@@ -163,11 +177,12 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
     a.b += samples[s].rgb[2]
     a.n++
   }
-  const centroidRgb: RGB[] = rgbAcc.map((a, c) =>
-    a.n > 0
-      ? [Math.round(a.r / a.n), Math.round(a.g / a.n), Math.round(a.b / a.n)]
-      : ([Math.round(centroids[c].L * 2.55), 128, 128] as RGB),
-  )
+  const centroidRgb: RGB[] = rgbAcc.map((a, c) => {
+    if (a.n > 0) return [Math.round(a.r / a.n), Math.round(a.g / a.n), Math.round(a.b / a.n)]
+    // 空クラスタ: L からグレー近似（Lab の a=b=0 は無彩色）
+    const v = Math.max(0, Math.min(255, Math.round(centroids[c].L * 2.55)))
+    return [v, v, v] as RGB
+  })
 
   // 全不透明画素を最近傍セントロイドに置換（5bit 量子化キーでキャッシュ）
   const cache = new Map<number, number>()
