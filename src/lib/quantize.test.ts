@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { AQUA_PALETTE, beadColorById } from './palette'
 import { STANDARD_TRAY, totalCells } from './grid'
 import type { ImageLike, RepColorMethod } from './quantize'
-import { imageToPattern, representativeColor } from './quantize'
+import { imageToPattern, imageToPatternWithStats, representativeColor } from './quantize'
 import { countBeads, emptyCellCount, isValidPattern, totalBeads } from './pattern'
 import { sobelMagnitude } from './preprocess'
 
@@ -297,5 +297,56 @@ describe('輪郭ビーズ', () => {
       edgeMag: sobelMagnitude(image),
     })
     expect(b.cells).toEqual(a.cells)
+  })
+})
+
+describe('imageToPatternWithStats', () => {
+  it('stats の形が spec と一致し、pattern はラッパーと同一', () => {
+    const image = solidImage(220, 226, [231, 0, 18])
+    const { pattern, stats } = imageToPatternWithStats(image, STANDARD_TRAY, AQUA_PALETTE)
+    expect(pattern.cells).toEqual(imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE).cells)
+    expect(stats.targets.length).toBe(STANDARD_TRAY.rows)
+    for (let r = 0; r < STANDARD_TRAY.rows; r++) {
+      expect(stats.targets[r].length).toBe(pattern.cells[r].length)
+      expect(stats.opaqueFraction[r].length).toBe(pattern.cells[r].length)
+      expect(stats.edgeDensity[r].length).toBe(pattern.cells[r].length)
+      expect(stats.outlineCells[r].length).toBe(pattern.cells[r].length)
+    }
+    // 全不透明・単色なら全セルに代表色が入る
+    expect(stats.targets.flat().every((t) => t !== null)).toBe(true)
+    expect(stats.opaqueFraction.flat().every((f) => f === 1)).toBe(true)
+  })
+
+  it('targets はディザリングの誤差拡散に汚染されない（事前スナップショット）', () => {
+    // 左右2色のグラデーションでディザを発生させる
+    const image = solidImage(220, 226, [200, 100, 100])
+    for (let y = 0; y < 226; y++) {
+      for (let x = 0; x < 220; x++) {
+        const i = (y * 220 + x) * 4
+        image.data[i] = Math.round((x / 219) * 255)
+      }
+    }
+    const noDither = imageToPatternWithStats(image, STANDARD_TRAY, AQUA_PALETTE, { dither: false })
+    const withDither = imageToPatternWithStats(image, STANDARD_TRAY, AQUA_PALETTE, { dither: true })
+    expect(withDither.stats.targets).toEqual(noDither.stats.targets)
+  })
+
+  it('輪郭セルが outlineCells に記録される', () => {
+    const image = solidImage(220, 226, [231, 0, 18])
+    for (let y = 0; y < 226; y++) {
+      for (let x = 110; x < 220; x++) {
+        const i = (y * 220 + x) * 4
+        image.data[i] = 255
+        image.data[i + 1] = 228
+        image.data[i + 2] = 0
+      }
+    }
+    const { pattern, stats } = imageToPatternWithStats(image, STANDARD_TRAY, AQUA_PALETTE, {
+      outline: { density: 0.08 },
+    })
+    const darkest = pattern.cells.flat().filter((_, i) => stats.outlineCells.flat()[i])
+    expect(darkest.length).toBeGreaterThan(0)
+    // 記録された輪郭セルはすべて同一（最暗色）の index
+    expect(new Set(darkest).size).toBe(1)
   })
 })

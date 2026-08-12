@@ -1,6 +1,7 @@
+import type { BackgroundMode } from '../lib/pipeline'
 import { Segmented, SliderRow, SwitchRow } from './controls'
 
-export type BackgroundMode = 'none' | 'auto' | 'simple'
+export type { BackgroundMode }
 
 export interface IllustOptions {
   /** 背景除去: なし / AI / 単色背景（四隅の色ベース） */
@@ -13,10 +14,14 @@ export interface IllustOptions {
   colors: number
   /** エッジ保存平滑化（Kuwahara） */
   smooth: boolean
+  /** Kuwahara 半径（大きいほど強く潰す） */
+  smoothRadius: number
   /** 輪郭ビーズ */
   outline: boolean
   /** 輪郭の強さ 0-100（大きいほど輪郭が増える） */
   outlineStrength: number
+  /** セルを空きマスにする不透明率の下限 0.1-0.6 */
+  emptyBelow: number
 }
 
 export const DEFAULT_ILLUST: IllustOptions = {
@@ -25,8 +30,10 @@ export const DEFAULT_ILLUST: IllustOptions = {
   posterize: true,
   colors: 8,
   smooth: true,
+  smoothRadius: 2,
   outline: true,
   outlineStrength: 50,
+  emptyBelow: 0.35,
 }
 
 interface Props {
@@ -117,6 +124,35 @@ export function IllustSettings({ options, onChange, segError }: Props) {
           />
         )}
       </div>
+
+      <details className="advanced">
+        <summary>詳細設定</summary>
+        <div className="field">
+          <SliderRow
+            label="空きマス閾値"
+            value={Math.round(options.emptyBelow * 100)}
+            onChange={(v) => onChange({ ...options, emptyBelow: v / 100 })}
+            min={10}
+            max={60}
+            suffix="%"
+          />
+          <p className="field-hint">
+            セル内の不透明部分がこの割合未満なら空きマスにします。下げると被写体の輪郭が欠けにくく、上げると背景の残りが消えます。
+          </p>
+        </div>
+        {options.smooth && (
+          <div className="field">
+            <SliderRow
+              label="なめらか半径"
+              value={options.smoothRadius}
+              onChange={(v) => onChange({ ...options, smoothRadius: v })}
+              min={1}
+              max={4}
+            />
+            <p className="field-hint">大きいほど強く平滑化します（イラスト感が増す）。</p>
+          </div>
+        )}
+      </details>
     </section>
   )
 }

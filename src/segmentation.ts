@@ -146,14 +146,5 @@ export async function segmentSubject(image: ImageLike): Promise<Float32Array> {
   return resizeBilinear(mask320, MODEL_SIZE, MODEL_SIZE, image.width, image.height)
 }
 
-/** マスクを alpha チャンネルに適用する（smoothstep で軽くフェザリング） */
-export function applyMask(image: ImageLike, mask: Float32Array): void {
-  for (let i = 0; i < mask.length; i++) {
-    let t = (mask[i] - 0.25) / 0.5
-    t = t < 0 ? 0 : t > 1 ? 1 : t
-    const s = t * t * (3 - 2 * t)
-    const p = i * 4 + 3
-    const a = Math.round(s * 255)
-    if (a < image.data[p]) image.data[p] = a
-  }
-}
+// マスクの alpha 適用（applyMask）は lib/pipeline.ts に移動した
+// （Worker / Node でも使う純関数のため）
