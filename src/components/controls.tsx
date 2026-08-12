@@ -1,6 +1,6 @@
 // 設定 UI の共通コントロール（segmented / slider / switch / number）
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export function Segmented<T extends string>({
   value,
@@ -34,6 +34,7 @@ export function SliderRow({
   min,
   max,
   suffix = '',
+  liveMs = 300,
 }: {
   label: string
   value: number
@@ -41,14 +42,37 @@ export function SliderRow({
   min: number
   max: number
   suffix?: string
+  /** ドラッグ中のライブ反映のデバウンス (ms)。0 以下で無効（離した時のみ確定） */
+  liveMs?: number
 }) {
-  // 変換パイプラインが重いため、ドラッグ中はローカル値の表示だけ更新し、
-  // 離した時（pointerup / keyup / blur）に1回だけ onChange で確定する
+  // ドラッグ中はローカル値を即時表示しつつ、liveMs デバウンスで onChange を発火して
+  // プレビューを追従させる。離した時（pointerup / keyup / blur）の確定は従来どおり
   const [draft, setDraft] = useState<number | null>(null)
+  const timer = useRef<number | null>(null)
   const shown = draft ?? value
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+    },
+    [],
+  )
   const commit = () => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current)
+      timer.current = null
+    }
     if (draft !== null && draft !== value) onChange(draft)
     setDraft(null)
+  }
+  const handleInput = (v: number) => {
+    setDraft(v)
+    if (liveMs > 0) {
+      if (timer.current !== null) clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => {
+        timer.current = null
+        onChange(v)
+      }, liveMs)
+    }
   }
   return (
     <div className="slider-row">
@@ -59,7 +83,7 @@ export function SliderRow({
         max={max}
         value={shown}
         aria-label={label}
-        onChange={(e) => setDraft(Number(e.target.value))}
+        onChange={(e) => handleInput(Number(e.target.value))}
         onPointerUp={commit}
         onPointerCancel={commit}
         onKeyUp={commit}

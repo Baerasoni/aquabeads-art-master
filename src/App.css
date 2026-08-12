@@ -701,3 +701,44 @@ input[type='range'] {
   color: var(--ink-tertiary);
   text-align: center;
 }
+
+/* ---------- おまかせ調整 ---------- */
+.auto-adjust {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.auto-adjust-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.auto-adjust-progress progress {
+  flex: 1;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+/* ---------- 詳細設定 ---------- */
+details.advanced {
+  margin-top: 14px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 10px;
+}
+
+details.advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  user-select: none;
+}
+
+details.advanced[open] summary {
+  margin-bottom: 10px;
+}

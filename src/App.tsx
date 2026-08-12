@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import type { AutoAdjustRunState } from './components/AutoAdjustButton'
+import { AutoAdjustButton } from './components/AutoAdjustButton'
 import { BeadCountList } from './components/BeadCountList'
 import type { Adjust, ConvertOptions } from './components/GridSettings'
 import { GridSettings } from './components/GridSettings'
@@ -8,20 +10,21 @@ import { DEFAULT_ILLUST, IllustSettings } from './components/IllustSettings'
 import { ImageDropzone } from './components/ImageDropzone'
 import { PaletteSelector } from './components/PaletteSelector'
 import { PatternGrid } from './components/PatternGrid'
+import type { Preset } from './components/Presets'
+import { PresetChips } from './components/Presets'
 import { PrintSheet } from './components/PrintSheet'
+import { resizeImage, resizeMask } from './lib/adjust'
+import type { AutoAdjustResult } from './lib/autoAdjust'
+import { autoAdjust } from './lib/autoAdjust'
 import type { GridSpec } from './lib/grid'
 import { STANDARD_TRAY, totalCells } from './lib/grid'
 import { AQUA_PALETTE, DEFAULT_OWNED_IDS } from './lib/palette'
-import {
-  cropToSubject,
-  kuwahara,
-  posterizeKMeans,
-  removeBackgroundSimple,
-  sobelMagnitude,
-} from './lib/preprocess'
-import type { ImageLike, QuantizeOptions } from './lib/quantize'
-import { imageToPattern } from './lib/quantize'
-import { applyMask, segmentSubject } from './segmentation'
+import type { PipelineCache, PipelineParams, PipelineResult } from './lib/pipeline'
+import { createPipelineCache, runPipeline } from './lib/pipeline'
+import type { ImageLike } from './lib/quantize'
+import { clearSettings, DEFAULT_SETTINGS, loadSettings, saveSettings } from './lib/settings'
+import { segmentSubject } from './segmentation'
+import type { AutoAdjustMessage, AutoAdjustRequest } from './worker/autoAdjustTypes'
 
 const OWNED_KEY = 'aqua.ownedIds'
 const HERO_BEAD_IDS = ['m01', 'm02', 'm03', 'm09', 'm07', 'm06', 'm05', 'm04']
@@ -42,46 +45,35 @@ function loadOwnedIds(): Set<string> {
   return new Set(DEFAULT_OWNED_IDS)
 }
 
-/** 前処理パイプラインの段階キャッシュ。各キーは上流段のキーを含む合成キー */
-interface StageCache {
-  filteredKey: string
-  filtered: ImageData | null
+/**
+ * 写真ごとの前段キャッシュ。base（調整前・縮小済み画像）と AI マスクは seq ごとに
+ * 1回だけ作り、パラメータ変更では lib/pipeline.ts の PipelineCache が
+ * 変わった段以降だけを再計算する
+ */
+interface SourceCache {
+  baseSeq: number
+  base: ImageLike | null
   maskSeq: number
   maskPromise: Promise<Float32Array> | null
-  bgKey: string
-  bg: ImageLike | null
-  cropKey: string
-  crop: ImageLike | null
-  smoothKey: string
-  smooth: ImageLike | null
+  pipe: PipelineCache
 }
 
-const emptyStages = (): StageCache => ({
-  filteredKey: '',
-  filtered: null,
+const emptySourceCache = (): SourceCache => ({
+  baseSeq: -1,
+  base: null,
   maskSeq: -1,
   maskPromise: null,
-  bgKey: '',
-  bg: null,
-  cropKey: '',
-  crop: null,
-  smoothKey: '',
-  smooth: null,
+  pipe: createPipelineCache(),
 })
 
-function drawScaled(bitmap: ImageBitmap, w: number, h: number, filter?: string): ImageData | null {
+function drawScaled(bitmap: ImageBitmap, w: number, h: number): ImageData | null {
   const cv = document.createElement('canvas')
   cv.width = w
   cv.height = h
   const ctx = cv.getContext('2d', { willReadFrequently: true })
   if (!ctx) return null
-  if (filter) ctx.filter = filter
   ctx.drawImage(bitmap, 0, 0, w, h)
   return ctx.getImageData(0, 0, w, h)
-}
-
-function copyImage(img: ImageLike): ImageLike {
-  return { width: img.width, height: img.height, data: img.data.slice() }
 }
 
 /** busy 表示などを描画してから重い同期処理に入るための待機 */
@@ -104,37 +96,69 @@ export default function App() {
   } | null>(null)
   const seqRef = useRef(0)
   const [sourceUrl, setSourceUrl] = useState('')
-  const [imageData, setImageData] = useState<ImageLike | null>(null)
-  const [spec, setSpec] = useState<GridSpec>(STANDARD_TRAY)
+  const [result, setResult] = useState<PipelineResult | null>(null)
+  const [spec, setSpec] = useState<GridSpec>(() => loadSettings()?.spec ?? STANDARD_TRAY)
   const [ownedIds, setOwnedIds] = useState<Set<string>>(loadOwnedIds)
-  const [adjust, setAdjust] = useState<Adjust>({ brightness: 100, contrast: 100, saturation: 100 })
-  const [options, setOptions] = useState<ConvertOptions>({
-    deltaE: 'ciede2000',
-    repColor: 'median',
-    dither: false,
-  })
-  const [illust, setIllust] = useState<IllustOptions>(DEFAULT_ILLUST)
+  const [adjust, setAdjust] = useState<Adjust>(
+    () => loadSettings()?.adjust ?? DEFAULT_SETTINGS.adjust,
+  )
+  const [options, setOptions] = useState<ConvertOptions>(
+    () => loadSettings()?.options ?? DEFAULT_SETTINGS.options,
+  )
+  const [illust, setIllust] = useState<IllustOptions>(() => loadSettings()?.illust ?? DEFAULT_ILLUST)
   const [showCodes, setShowCodes] = useState(false)
   const [busy, setBusy] = useState(false)
   const [segError, setSegError] = useState(false)
   const runId = useRef(0)
-  // 前処理は段階ごとに合成キーでキャッシュし、変わったパラメータ以降の段だけ再計算する。
-  // 特に AI マスクは写真 (seq) ごとに1回だけ推論し、調整スライダーでは再実行しない
-  const stages = useRef<StageCache>(emptyStages())
+  // 写真ごとの base / AI マスク + パイプラインの段階キャッシュ。
+  // AI マスクは写真 (seq) ごとに1回だけ推論し、調整スライダーでは再実行しない
+  const stages = useRef<SourceCache>(emptySourceCache())
 
   // 手持ち色の永続化
   useEffect(() => {
     localStorage.setItem(OWNED_KEY, JSON.stringify([...ownedIds]))
   }, [ownedIds])
 
-  // 画像 + 調整 + イラスト化 → ImageLike（前処理パイプライン）
+  // 設定の永続化（リロードしても調整が消えない）
+  useEffect(() => {
+    saveSettings({ v: 1, adjust, illust, options, spec })
+  }, [adjust, illust, options, spec])
+
+  const ownedPalette = useMemo(() => AQUA_PALETTE.filter((c) => ownedIds.has(c.id)), [ownedIds])
+
+  // UI の3状態（adjust / illust / options）をパイプラインパラメータへ合流
+  const params = useMemo<PipelineParams>(
+    () => ({
+      adjust,
+      background: illust.background,
+      autoZoom: illust.autoZoom,
+      posterize: illust.posterize,
+      colors: illust.colors,
+      smooth: illust.smooth,
+      smoothRadius: illust.smoothRadius,
+      outline: illust.outline,
+      outlineStrength: illust.outlineStrength,
+      emptyBelow: illust.emptyBelow,
+      deltaE: options.deltaE,
+      repColor: options.repColor,
+      dither: options.dither,
+    }),
+    [adjust, illust, options],
+  )
+
+  // 画像 + 全パラメータ → 図案（lib/pipeline.ts の共有パイプライン）
   useEffect(() => {
     // source クリアを含むあらゆる変更で進行中の run を無効化する
     const id = ++runId.current
     if (!source) {
-      setImageData(null)
+      setResult(null)
       setBusy(false)
-      stages.current = emptyStages()
+      stages.current = emptySourceCache()
+      return
+    }
+    if (ownedPalette.length === 0) {
+      setResult(null)
+      setBusy(false)
       return
     }
     const run = async () => {
@@ -145,33 +169,25 @@ export default function App() {
         if (runId.current !== id) return
         const c = stages.current
         const { bitmap } = source
-        const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height))
-        const w = Math.max(1, Math.round(bitmap.width * scale))
-        const h = Math.max(1, Math.round(bitmap.height * scale))
 
-        const filteredKey = `${source.seq}:${adjust.brightness}:${adjust.contrast}:${adjust.saturation}`
-        let filtered = c.filteredKey === filteredKey ? c.filtered : null
-        if (!filtered) {
+        // base: 調整前・縮小済み RGBA。写真ごとに1回だけ canvas で作る
+        if (c.baseSeq !== source.seq || !c.base) {
+          const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height))
+          const w = Math.max(1, Math.round(bitmap.width * scale))
+          const h = Math.max(1, Math.round(bitmap.height * scale))
           // 透明部分は保持する（空きマスになる）。白下地は敷かない
-          filtered = drawScaled(
-            bitmap,
-            w,
-            h,
-            `brightness(${adjust.brightness}%) contrast(${adjust.contrast}%) saturate(${adjust.saturation}%)`,
-          )
-          if (!filtered) return
-          c.filtered = filtered
-          c.filteredKey = filteredKey
+          const base = drawScaled(bitmap, w, h)
+          if (!base) return
+          c.base = base
+          c.baseSeq = source.seq
         }
 
         let mask: Float32Array | null = null
-        if (illust.background === 'auto') {
+        if (params.background === 'auto') {
           // マスクは被写体の形にのみ依存し、segmentSubject は画像内最大画素値で正規化する
-          // ため明るさ等の調整に影響されない。無調整の元画像から写真ごとに1回だけ推論する
+          // ため明るさ等の調整に影響されない。無調整の base から写真ごとに1回だけ推論する
           if (c.maskSeq !== source.seq || !c.maskPromise) {
-            const original = drawScaled(bitmap, w, h)
-            if (!original) return
-            const p = segmentSubject(original)
+            const p = segmentSubject(c.base)
             c.maskSeq = source.seq
             c.maskPromise = p
             // 失敗は次の run で再試行できるようにキャッシュから外す
@@ -189,64 +205,17 @@ export default function App() {
           if (runId.current !== id) return
         }
 
-        const bgKey = `${filteredKey}|${illust.background}|${mask ? 'm' : '-'}`
-        let bg = c.bgKey === bgKey ? c.bg : null
-        if (!bg) {
-          if (mask) {
-            // applyMask は唯一の破壊的関数なので、キャッシュ済み filtered のコピーに適用する
-            const masked = copyImage(filtered)
-            applyMask(masked, mask)
-            bg = masked
-          } else if (illust.background === 'simple') {
-            await yieldToPaint()
-            if (runId.current !== id) return
-            bg = removeBackgroundSimple(filtered)
-          } else {
-            // 下流の関数はすべて非破壊なのでキャッシュを共有してよい
-            bg = filtered
-          }
-          c.bg = bg
-          c.bgKey = bgKey
-        }
-
-        const cropKey = `${bgKey}|${illust.background !== 'none' && illust.autoZoom}`
-        let crop = c.cropKey === cropKey ? c.crop : null
-        if (!crop) {
-          crop = illust.background !== 'none' && illust.autoZoom ? cropToSubject(bg) : bg
-          c.crop = crop
-          c.cropKey = cropKey
-        }
-
-        const smoothKey = `${cropKey}|${illust.smooth}`
-        let smooth = c.smoothKey === smoothKey ? c.smooth : null
-        if (!smooth) {
-          if (illust.smooth) {
-            await yieldToPaint()
-            if (runId.current !== id) return
-            smooth = kuwahara(crop, 2)
-          } else {
-            smooth = crop
-          }
-          c.smooth = smooth
-          c.smoothKey = smoothKey
-        }
-
-        let img: ImageLike = smooth
-        if (illust.posterize) {
-          await yieldToPaint()
-          if (runId.current !== id) return
-          img = posterizeKMeans(img, illust.colors)
-        }
-
-        if (runId.current === id) setImageData(img)
+        const res = await runPipeline(c.base, mask, params, spec, ownedPalette, c.pipe, {
+          onStage: yieldToPaint,
+          shouldStop: () => runId.current !== id,
+        })
+        if (res && runId.current === id) setResult(res)
       } finally {
         if (runId.current === id) setBusy(false)
       }
     }
     run()
-    // outline / outlineStrength は quantizeOptions 側でのみ使うため依存に含めない
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, adjust, illust.background, illust.autoZoom, illust.smooth, illust.posterize, illust.colors])
+  }, [source, params, spec, ownedPalette])
 
   // サムネイル URL
   useEffect(() => {
@@ -262,29 +231,127 @@ export default function App() {
     setSourceUrl(cv.toDataURL())
   }, [source])
 
-  const ownedPalette = useMemo(() => AQUA_PALETTE.filter((c) => ownedIds.has(c.id)), [ownedIds])
+  const pattern = ownedPalette.length > 0 ? (result?.pattern ?? null) : null
 
-  // Sobel は image にのみ依存するため巻き上げ、輪郭の強さ変更で再計算されないようにする
-  const edgeMag = useMemo(
-    () => (imageData && illust.outline ? sobelMagnitude(imageData) : null),
-    [imageData, illust.outline],
-  )
+  // --- おまかせ自動調整 ---
+  const [autoRun, setAutoRun] = useState<AutoAdjustRunState | null>(null)
+  const [autoNote, setAutoNote] = useState('')
+  const autoWorker = useRef<Worker | null>(null)
+  const autoCancelled = useRef(false)
 
-  const quantizeOptions = useMemo<QuantizeOptions>(
-    () => ({
-      ...options,
-      outline: illust.outline
-        ? { density: 0.04 + ((100 - illust.outlineStrength) / 100) * 0.16 }
-        : undefined,
-      edgeMag: edgeMag ?? undefined,
-    }),
-    [options, illust.outline, illust.outlineStrength, edgeMag],
-  )
+  const applyAutoResult = (r: AutoAdjustResult) => {
+    const p = r.params
+    setAdjust(p.adjust)
+    setIllust((prev) => ({
+      ...prev,
+      posterize: p.posterize,
+      colors: p.colors,
+      smooth: p.smooth,
+      smoothRadius: p.smoothRadius,
+      outline: p.outline,
+      outlineStrength: p.outlineStrength,
+      emptyBelow: p.emptyBelow,
+    }))
+    setOptions({ deltaE: p.deltaE, repColor: p.repColor, dither: p.dither })
+    setAutoNote(`スコア ${r.seedScore.total.toFixed(0)} → ${r.score.total.toFixed(0)}`)
+  }
 
-  const pattern = useMemo(() => {
-    if (!imageData || ownedPalette.length === 0) return null
-    return imageToPattern(imageData, spec, ownedPalette, quantizeOptions)
-  }, [imageData, spec, ownedPalette, quantizeOptions])
+  const cancelAutoAdjust = () => {
+    autoCancelled.current = true
+    autoWorker.current?.terminate()
+    autoWorker.current = null
+    setAutoRun(null)
+  }
+
+  const applyPreset = (p: Preset) => {
+    setIllust(p.illust)
+    setOptions(p.options)
+    setAutoNote('')
+  }
+
+  const resetAllSettings = () => {
+    clearSettings()
+    setAdjust(DEFAULT_SETTINGS.adjust)
+    setIllust(DEFAULT_SETTINGS.illust)
+    setOptions(DEFAULT_SETTINGS.options)
+    setSpec(DEFAULT_SETTINGS.spec)
+    setAutoNote('')
+  }
+
+  const runAutoAdjust = async () => {
+    const c = stages.current
+    if (!c.base || autoRun || ownedPalette.length === 0) return
+    autoCancelled.current = false
+    setAutoNote('')
+    setAutoRun({ done: 0, total: 1, best: 0 })
+
+    let mask: Float32Array | null = null
+    if (params.background === 'auto' && c.maskPromise) {
+      try {
+        mask = await c.maskPromise
+      } catch {
+        mask = null
+      }
+    }
+    if (autoCancelled.current) return
+
+    // 探索は 320px 縮小で行う（確定後のフル解像度適用は通常パイプラインが行う）
+    const searchBase = resizeImage(c.base, 320)
+    const searchMask = mask
+      ? resizeMask(mask, c.base.width, c.base.height, searchBase.width, searchBase.height)
+      : null
+    const request: AutoAdjustRequest = {
+      base: searchBase,
+      mask: searchMask,
+      seed: params,
+      spec,
+      palette: ownedPalette,
+    }
+    const finish = (r: AutoAdjustResult) => {
+      autoWorker.current = null
+      if (autoCancelled.current) return
+      applyAutoResult(r)
+      setAutoRun(null)
+    }
+    // Worker が使えない環境ではメインスレッドで実行する（同一関数のフォールバック）
+    const runOnMainThread = async () => {
+      const r = await autoAdjust(request.base, request.mask, request.seed, request.spec, request.palette, {
+        onProgress: async (p) => {
+          setAutoRun({ done: p.done, total: p.totalEstimate, best: p.bestScore })
+          await yieldToPaint()
+        },
+        shouldStop: () => autoCancelled.current,
+      })
+      finish(r)
+    }
+    try {
+      const worker = new Worker(new URL('./worker/autoAdjust.worker.ts', import.meta.url), {
+        type: 'module',
+      })
+      autoWorker.current = worker
+      worker.onmessage = (e: MessageEvent<AutoAdjustMessage>) => {
+        const msg = e.data
+        if (msg.type === 'progress') {
+          setAutoRun({ done: msg.done, total: msg.totalEstimate, best: msg.bestScore })
+        } else if (msg.type === 'done') {
+          worker.terminate()
+          finish(msg.result)
+        } else {
+          worker.terminate()
+          autoWorker.current = null
+          runOnMainThread()
+        }
+      }
+      worker.onerror = () => {
+        worker.terminate()
+        autoWorker.current = null
+        runOnMainThread()
+      }
+      worker.postMessage(request)
+    } catch {
+      runOnMainThread()
+    }
+  }
 
   return (
     <>
@@ -396,6 +463,15 @@ export default function App() {
                 </div>
 
                 <div className="stack">
+                  <AutoAdjustButton
+                    disabled={!source || busy || ownedPalette.length === 0}
+                    running={autoRun}
+                    note={autoNote}
+                    onRun={runAutoAdjust}
+                    onCancel={cancelAutoAdjust}
+                  >
+                    <PresetChips illust={illust} options={options} onApply={applyPreset} />
+                  </AutoAdjustButton>
                   <IllustSettings options={illust} onChange={setIllust} segError={segError} />
                   <GridSettings
                     spec={spec}
@@ -406,6 +482,9 @@ export default function App() {
                     onOptions={setOptions}
                   />
                   <PaletteSelector ownedIds={ownedIds} onChange={setOwnedIds} />
+                  <button type="button" className="btn-link" onClick={resetAllSettings}>
+                    すべての設定をリセット
+                  </button>
                 </div>
               </div>
             </>

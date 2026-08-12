@@ -208,8 +208,8 @@ function sampleCell(
 
 const clamp255 = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v)
 
-/** 六角格子の隣接セル座標（同行左右 + 上下行の2つずつ） */
-function hexNeighbors(spec: GridSpec, row: number, col: number): [number, number][] {
+/** 六角格子の隣接セル座標（同行左右 + 上下行の2つずつ）。範囲外座標も含むので呼び出し側で除外する */
+export function hexNeighbors(spec: GridSpec, row: number, col: number): [number, number][] {
   const long = isLongRow(spec, row)
   // 長い行のセル col の上下隣は (col-1, col)、短い行のセル col の上下隣は (col, col+1)
   const a = long ? col - 1 : col
@@ -238,6 +238,18 @@ export function darkestPaletteIndex(palette: BeadColor[]): number {
   return best
 }
 
+/** 図案化の中間データ。品質スコア（score.ts）や自動調整の評価に使う */
+export interface CellStats {
+  /** pass1 の代表色（ディザリングによる破壊的更新の前のスナップショット）。null = 空きマス */
+  targets: (RGB | null)[][]
+  /** セル円内の不透明画素の割合 */
+  opaqueFraction: number[][]
+  /** 強エッジ画素の割合（輪郭オプション無効時はすべて 0） */
+  edgeDensity: number[][]
+  /** 輪郭ビーズ（最暗色強制）になったセル */
+  outlineCells: boolean[][]
+}
+
 /** 画像をグリッドに cover 配置して図案化する */
 export function imageToPattern(
   image: ImageLike,
@@ -245,6 +257,16 @@ export function imageToPattern(
   palette: BeadColor[],
   options: QuantizeOptions = {},
 ): Pattern {
+  return imageToPatternWithStats(image, spec, palette, options).pattern
+}
+
+/** imageToPattern と同じ変換を行い、スコア計算用の中間データも返す */
+export function imageToPatternWithStats(
+  image: ImageLike,
+  spec: GridSpec,
+  palette: BeadColor[],
+  options: QuantizeOptions = {},
+): { pattern: Pattern; stats: CellStats } {
   if (palette.length === 0) throw new Error('パレットが空です（手持ち色を1色以上選択してください）')
   const {
     repColor = 'median',
@@ -269,9 +291,11 @@ export function imageToPattern(
   // pass1: 各セルの代表色（空きマスは null）とエッジ密度
   const targets: (RGB | null)[][] = []
   const edges: number[][] = []
+  const opaque: number[][] = []
   for (let row = 0; row < spec.rows; row++) {
     const tLine: (RGB | null)[] = []
     const eLine: number[] = []
+    const oLine: number[] = []
     for (let col = 0; col < rowLength(spec, row); col++) {
       const { x, y } = cellCenterMm(spec, row, col)
       const cx = offX + (x + beadR) * scale
@@ -281,10 +305,18 @@ export function imageToPattern(
         ? null
         : representativeColor(s.pixels, repColor))
       eLine.push(s.edgeDensity)
+      oLine.push(s.opaqueFraction)
     }
     targets.push(tLine)
     edges.push(eLine)
+    opaque.push(oLine)
   }
+
+  // ディザリングは targets を破壊的に更新するため、スコア用の代表色はここで確定させる
+  const targetSnapshot: (RGB | null)[][] = targets.map((line) =>
+    line.map((t) => (t ? ([t[0], t[1], t[2]] as RGB) : null)),
+  )
+  const outlineCells: boolean[][] = targets.map((line) => line.map(() => false))
 
   const hasEmpty = targets.some((line) => line.some((t) => t === null))
   const paletteLabs = palette.map((c) => srgbToLab(c.rgb))
@@ -313,6 +345,7 @@ export function imageToPattern(
           })
         if (silhouette || edges[row][col] >= outline.density) {
           line.push(outlineIdx)
+          outlineCells[row][col] = true
           continue // 輪郭セルは誤差拡散に参加しない
         }
       }
@@ -347,5 +380,8 @@ export function imageToPattern(
     }
     cells.push(line)
   }
-  return { spec, palette, cells }
+  return {
+    pattern: { spec, palette, cells },
+    stats: { targets: targetSnapshot, opaqueFraction: opaque, edgeDensity: edges, outlineCells },
+  }
 }

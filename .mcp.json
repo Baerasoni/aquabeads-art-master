@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "aquabeads": {
+      "command": "npx",
+      "args": ["tsx", "mcp/server.ts"]
+    }
+  }
+}
