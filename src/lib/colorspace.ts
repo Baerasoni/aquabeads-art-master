@@ -14,7 +14,17 @@ export interface Lab {
 
 export type DeltaEMethod = 'cie76' | 'ciede2000'
 
+// 0-255 整数入力用の事前計算テーブル。srgbToLab は k-means・簡易背景除去・
+// 最近傍探索のホットパスで呼ばれ、Math.pow が支配的なため LUT で置き換える
+const LINEAR_LUT = new Float64Array(256)
+for (let i = 0; i < 256; i++) {
+  const v = i / 255
+  LINEAR_LUT[i] = v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+}
+
 function srgbToLinear(c: number): number {
+  // 画素値はほぼ常に 0-255 の整数。ディザの誤差拡散由来の小数だけ従来式で計算する
+  if (c >= 0 && c <= 255 && Number.isInteger(c)) return LINEAR_LUT[c]
   const v = c / 255
   return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
 }

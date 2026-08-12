@@ -4,6 +4,7 @@ import { STANDARD_TRAY, totalCells } from './grid'
 import type { ImageLike, RepColorMethod } from './quantize'
 import { imageToPattern, representativeColor } from './quantize'
 import { countBeads, emptyCellCount, isValidPattern, totalBeads } from './pattern'
+import { sobelMagnitude } from './preprocess'
 
 const METHODS: RepColorMethod[] = ['mean', 'median', 'mode']
 
@@ -277,5 +278,24 @@ describe('輪郭ビーズ', () => {
     })
     const names = countBeads(pattern).map((c) => c.color.name)
     expect(names).toContain('くろ')
+  })
+
+  it('事前計算した edgeMag を渡しても結果は同一（App 側の巻き上げ最適化の等価性）', () => {
+    const image = solidImage(220, 226, [231, 0, 18])
+    for (let y = 0; y < 226; y++) {
+      for (let x = 110; x < 220; x++) {
+        const i = (y * 220 + x) * 4
+        image.data[i] = 255
+        image.data[i + 1] = 228
+        image.data[i + 2] = 0
+      }
+    }
+    const opts = { outline: { density: 0.08 } }
+    const a = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE, opts)
+    const b = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE, {
+      ...opts,
+      edgeMag: sobelMagnitude(image),
+    })
+    expect(b.cells).toEqual(a.cells)
   })
 })

@@ -32,6 +32,9 @@ File → createImageBitmap → canvas 描画（明るさ等の filter・最大64
 
 - AI 背景除去は `onnxruntime-web/wasm` エントリを使うこと（デフォルトエントリは jsep 版 wasm を
   要求し、public/ort/ に置いた非 jsep 版と一致せず失敗する）
+- ort 本体（ort.wasm.bundle.min.mjs）はバンドラを通さず public/ort/ から実行時 import する
+  （`ort.env.wasm.proxy = true` の Worker がバンドラ産チャンクだとアプリ本体まで実行して落ちるため）。
+  public/ort/ の3ファイルと onnxruntime-web は同一バージョンで揃えて更新すること
 - モデル public/models/u2netp.onnx（rembg 配布, U²-Net Apache-2.0）と wasm ランタイム public/ort/ は自前ホスト
 
 - 状態管理は React 標準（useState/useReducer）。状態ライブラリは使わない

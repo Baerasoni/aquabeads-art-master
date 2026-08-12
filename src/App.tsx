@@ -17,6 +17,7 @@ import {
   kuwahara,
   posterizeKMeans,
   removeBackgroundSimple,
+  sobelMagnitude,
 } from './lib/preprocess'
 import type { ImageLike, QuantizeOptions } from './lib/quantize'
 import { imageToPattern } from './lib/quantize'
@@ -41,6 +42,60 @@ function loadOwnedIds(): Set<string> {
   return new Set(DEFAULT_OWNED_IDS)
 }
 
+/** 前処理パイプラインの段階キャッシュ。各キーは上流段のキーを含む合成キー */
+interface StageCache {
+  filteredKey: string
+  filtered: ImageData | null
+  maskSeq: number
+  maskPromise: Promise<Float32Array> | null
+  bgKey: string
+  bg: ImageLike | null
+  cropKey: string
+  crop: ImageLike | null
+  smoothKey: string
+  smooth: ImageLike | null
+}
+
+const emptyStages = (): StageCache => ({
+  filteredKey: '',
+  filtered: null,
+  maskSeq: -1,
+  maskPromise: null,
+  bgKey: '',
+  bg: null,
+  cropKey: '',
+  crop: null,
+  smoothKey: '',
+  smooth: null,
+})
+
+function drawScaled(bitmap: ImageBitmap, w: number, h: number, filter?: string): ImageData | null {
+  const cv = document.createElement('canvas')
+  cv.width = w
+  cv.height = h
+  const ctx = cv.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  if (filter) ctx.filter = filter
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  return ctx.getImageData(0, 0, w, h)
+}
+
+function copyImage(img: ImageLike): ImageLike {
+  return { width: img.width, height: img.height, data: img.data.slice() }
+}
+
+/** busy 表示などを描画してから重い同期処理に入るための待機 */
+function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (document.hidden) {
+      // 非表示タブでは rAF が発火しない
+      setTimeout(resolve, 0)
+    } else {
+      requestAnimationFrame(() => setTimeout(resolve, 0))
+    }
+  })
+}
+
 export default function App() {
   const [source, setSource] = useState<{
     bitmap: ImageBitmap
@@ -63,9 +118,9 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [segError, setSegError] = useState(false)
   const runId = useRef(0)
-  // AI マスクは (画像, 調整) に対して決定的なのでキャッシュし、
-  // ベタ塗り・輪郭など後段オプションの変更で推論が再実行されないようにする
-  const maskCache = useRef<{ key: string; mask: Float32Array } | null>(null)
+  // 前処理は段階ごとに合成キーでキャッシュし、変わったパラメータ以降の段だけ再計算する。
+  // 特に AI マスクは写真 (seq) ごとに1回だけ推論し、調整スライダーでは再実行しない
+  const stages = useRef<StageCache>(emptyStages())
 
   // 手持ち色の永続化
   useEffect(() => {
@@ -79,47 +134,109 @@ export default function App() {
     if (!source) {
       setImageData(null)
       setBusy(false)
+      stages.current = emptyStages()
       return
     }
     const run = async () => {
       setBusy(true)
       try {
+        // busy を描画してから重い処理に入る。古くなった run はここで脱落する
+        await yieldToPaint()
+        if (runId.current !== id) return
+        const c = stages.current
         const { bitmap } = source
         const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height))
         const w = Math.max(1, Math.round(bitmap.width * scale))
         const h = Math.max(1, Math.round(bitmap.height * scale))
-        const cv = document.createElement('canvas')
-        cv.width = w
-        cv.height = h
-        const ctx = cv.getContext('2d', { willReadFrequently: true })
-        if (!ctx) return
-        // 透明部分は保持する（空きマスになる）。白下地は敷かない
-        ctx.filter = `brightness(${adjust.brightness}%) contrast(${adjust.contrast}%) saturate(${adjust.saturation}%)`
-        ctx.drawImage(bitmap, 0, 0, w, h)
-        let img: ImageLike = ctx.getImageData(0, 0, w, h)
 
+        const filteredKey = `${source.seq}:${adjust.brightness}:${adjust.contrast}:${adjust.saturation}`
+        let filtered = c.filteredKey === filteredKey ? c.filtered : null
+        if (!filtered) {
+          // 透明部分は保持する（空きマスになる）。白下地は敷かない
+          filtered = drawScaled(
+            bitmap,
+            w,
+            h,
+            `brightness(${adjust.brightness}%) contrast(${adjust.contrast}%) saturate(${adjust.saturation}%)`,
+          )
+          if (!filtered) return
+          c.filtered = filtered
+          c.filteredKey = filteredKey
+        }
+
+        let mask: Float32Array | null = null
         if (illust.background === 'auto') {
-          const key = `${source.seq}:${adjust.brightness}:${adjust.contrast}:${adjust.saturation}`
-          let mask = maskCache.current?.key === key ? maskCache.current.mask : null
-          if (!mask) {
-            try {
-              if (runId.current !== id) return
-              mask = await segmentSubject(img)
-              maskCache.current = { key, mask }
-              if (runId.current === id) setSegError(false)
-            } catch {
-              if (runId.current === id) setSegError(true)
-              mask = null
-            }
+          // マスクは被写体の形にのみ依存し、segmentSubject は画像内最大画素値で正規化する
+          // ため明るさ等の調整に影響されない。無調整の元画像から写真ごとに1回だけ推論する
+          if (c.maskSeq !== source.seq || !c.maskPromise) {
+            const original = drawScaled(bitmap, w, h)
+            if (!original) return
+            const p = segmentSubject(original)
+            c.maskSeq = source.seq
+            c.maskPromise = p
+            // 失敗は次の run で再試行できるようにキャッシュから外す
+            p.catch(() => {
+              if (c.maskPromise === p) c.maskPromise = null
+            })
+          }
+          try {
+            mask = await c.maskPromise
+            if (runId.current === id) setSegError(false)
+          } catch {
+            if (runId.current === id) setSegError(true)
+            mask = null
           }
           if (runId.current !== id) return
-          if (mask) applyMask(img, mask)
-        } else if (illust.background === 'simple') {
-          img = removeBackgroundSimple(img)
         }
-        if (illust.background !== 'none' && illust.autoZoom) img = cropToSubject(img)
-        if (illust.smooth) img = kuwahara(img, 2)
-        if (illust.posterize) img = posterizeKMeans(img, illust.colors)
+
+        const bgKey = `${filteredKey}|${illust.background}|${mask ? 'm' : '-'}`
+        let bg = c.bgKey === bgKey ? c.bg : null
+        if (!bg) {
+          if (mask) {
+            // applyMask は唯一の破壊的関数なので、キャッシュ済み filtered のコピーに適用する
+            const masked = copyImage(filtered)
+            applyMask(masked, mask)
+            bg = masked
+          } else if (illust.background === 'simple') {
+            await yieldToPaint()
+            if (runId.current !== id) return
+            bg = removeBackgroundSimple(filtered)
+          } else {
+            // 下流の関数はすべて非破壊なのでキャッシュを共有してよい
+            bg = filtered
+          }
+          c.bg = bg
+          c.bgKey = bgKey
+        }
+
+        const cropKey = `${bgKey}|${illust.background !== 'none' && illust.autoZoom}`
+        let crop = c.cropKey === cropKey ? c.crop : null
+        if (!crop) {
+          crop = illust.background !== 'none' && illust.autoZoom ? cropToSubject(bg) : bg
+          c.crop = crop
+          c.cropKey = cropKey
+        }
+
+        const smoothKey = `${cropKey}|${illust.smooth}`
+        let smooth = c.smoothKey === smoothKey ? c.smooth : null
+        if (!smooth) {
+          if (illust.smooth) {
+            await yieldToPaint()
+            if (runId.current !== id) return
+            smooth = kuwahara(crop, 2)
+          } else {
+            smooth = crop
+          }
+          c.smooth = smooth
+          c.smoothKey = smoothKey
+        }
+
+        let img: ImageLike = smooth
+        if (illust.posterize) {
+          await yieldToPaint()
+          if (runId.current !== id) return
+          img = posterizeKMeans(img, illust.colors)
+        }
 
         if (runId.current === id) setImageData(img)
       } finally {
@@ -147,14 +264,21 @@ export default function App() {
 
   const ownedPalette = useMemo(() => AQUA_PALETTE.filter((c) => ownedIds.has(c.id)), [ownedIds])
 
+  // Sobel は image にのみ依存するため巻き上げ、輪郭の強さ変更で再計算されないようにする
+  const edgeMag = useMemo(
+    () => (imageData && illust.outline ? sobelMagnitude(imageData) : null),
+    [imageData, illust.outline],
+  )
+
   const quantizeOptions = useMemo<QuantizeOptions>(
     () => ({
       ...options,
       outline: illust.outline
         ? { density: 0.04 + ((100 - illust.outlineStrength) / 100) * 0.16 }
         : undefined,
+      edgeMag: edgeMag ?? undefined,
     }),
-    [options, illust.outline, illust.outlineStrength],
+    [options, illust.outline, illust.outlineStrength, edgeMag],
   )
 
   const pattern = useMemo(() => {

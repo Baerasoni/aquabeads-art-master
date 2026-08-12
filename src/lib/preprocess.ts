@@ -26,13 +26,12 @@ export function kuwahara(image: ImageLike, radius = 2): ImageLike {
     luma[i] = 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2]
   }
 
-  // 4象限: [dx0, dx1, dy0, dy1]（原点含む r+1 × r+1 窓）
-  const quads = [
-    [-radius, 0, -radius, 0],
-    [0, radius, -radius, 0],
-    [-radius, 0, 0, radius],
-    [0, radius, 0, radius],
-  ]
+  // 4象限（原点含む r+1 × r+1 窓）。全画素で回る最内ループのため、
+  // イテレータ + 分割代入を避けてフラット配列 + インデックスで持つ
+  const qx0 = [-radius, 0, -radius, 0]
+  const qx1 = [0, radius, 0, radius]
+  const qy0 = [-radius, -radius, 0, 0]
+  const qy1 = [0, 0, radius, radius]
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -40,7 +39,11 @@ export function kuwahara(image: ImageLike, radius = 2): ImageLike {
       let bR = 0
       let bG = 0
       let bB = 0
-      for (const [dx0, dx1, dy0, dy1] of quads) {
+      for (let q = 0; q < 4; q++) {
+        const dx0 = qx0[q]
+        const dx1 = qx1[q]
+        const dy0 = qy0[q]
+        const dy1 = qy1[q]
         let n = 0
         let sum = 0
         let sum2 = 0
@@ -104,14 +107,15 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
   if (k < 2) return out
 
   // 不透明画素をストライドサンプリング（最大 16384 点）
-  const opaqueIdx: number[] = []
+  const opaqueIdx = new Int32Array(w * h)
+  let opaqueCount = 0
   for (let i = 0; i < w * h; i++) {
-    if (src[i * 4 + 3] >= 128) opaqueIdx.push(i)
+    if (src[i * 4 + 3] >= 128) opaqueIdx[opaqueCount++] = i
   }
-  if (opaqueIdx.length === 0) return out
-  const stride = Math.max(1, Math.floor(opaqueIdx.length / 16384))
+  if (opaqueCount === 0) return out
+  const stride = Math.max(1, Math.floor(opaqueCount / 16384))
   const samples: { lab: { L: number; a: number; b: number }; rgb: RGB }[] = []
-  for (let s = 0; s < opaqueIdx.length; s += stride) {
+  for (let s = 0; s < opaqueCount; s += stride) {
     const p = opaqueIdx[s] * 4
     const rgb: RGB = [src[p], src[p + 1], src[p + 2]]
     samples.push({ lab: srgbToLab(rgb), rgb })
@@ -149,8 +153,12 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
     }
     return changed
   }
+  let converged = false
   for (let iter = 0; iter < maxIter; iter++) {
-    if (!assignAll()) break
+    if (!assignAll()) {
+      converged = true
+      break
+    }
     const acc = Array.from({ length: k }, () => ({ L: 0, a: 0, b: 0, n: 0 }))
     for (let s = 0; s < samples.length; s++) {
       const a = acc[assign[s]]
@@ -166,7 +174,8 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
     }
   }
   // maxIter 到達時はセントロイド更新が最終代入より後になるため、最終状態で取り直す
-  assignAll()
+  // （収束で抜けた場合は代入済みで再実行しても変化しないため省く）
+  if (!converged) assignAll()
 
   // 各クラスタの代表 RGB（クラスタ内平均）
   const rgbAcc = Array.from({ length: k }, () => ({ r: 0, g: 0, b: 0, n: 0 }))
@@ -184,13 +193,14 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
     return [v, v, v] as RGB
   })
 
-  // 全不透明画素を最近傍セントロイドに置換（5bit 量子化キーでキャッシュ）
-  const cache = new Map<number, number>()
-  for (const i of opaqueIdx) {
-    const p = i * 4
+  // 全不透明画素を最近傍セントロイドに置換（5bit 量子化キーの LUT でキャッシュ。
+  // キーは 15bit なので Map より固定長 Int16Array の方が速い。-1 = 未計算）
+  const cache = new Int16Array(32768).fill(-1)
+  for (let s = 0; s < opaqueCount; s++) {
+    const p = opaqueIdx[s] * 4
     const key = ((src[p] >> 3) << 10) | ((src[p + 1] >> 3) << 5) | (src[p + 2] >> 3)
-    let c = cache.get(key)
-    if (c === undefined) {
+    let c = cache[key]
+    if (c < 0) {
       const lab = srgbToLab([src[p], src[p + 1], src[p + 2]])
       let bestD = Infinity
       c = 0
@@ -204,7 +214,7 @@ export function posterizeKMeans(image: ImageLike, k: number, maxIter = 12): Imag
           c = j
         }
       }
-      cache.set(key, c)
+      cache[key] = c
     }
     out.data[p] = centroidRgb[c][0]
     out.data[p + 1] = centroidRgb[c][1]
@@ -245,39 +255,58 @@ export function removeBackgroundSimple(image: ImageLike, tolerance = 18): ImageL
   }
   seeds.push(cornerAvg(0, 0), cornerAvg(w - 3, 0), cornerAvg(0, h - 3), cornerAvg(w - 3, h - 3))
 
+  // Lab 変換を画素ごとに繰り返さないよう、色（24bit RGB）単位で判定結果をキャッシュする。
+  // 距離は 2 乗のまま比較して sqrt を省く（sqrt(x) < t ⇔ x < t²）
+  const tol2 = tolerance * tolerance
+  const bgColorCache = new Map<number, boolean>()
   const isBgColor = (p: number) => {
+    const key = (src[p] << 16) | (src[p + 1] << 8) | src[p + 2]
+    const cached = bgColorCache.get(key)
+    if (cached !== undefined) return cached
     const lab = srgbToLab([src[p], src[p + 1], src[p + 2]])
+    let isBg = false
     for (const s of seeds) {
       const dl = lab.L - s.L
       const da = lab.a - s.a
       const db = lab.b - s.b
-      if (Math.sqrt(dl * dl + da * da + db * db) < tolerance) return true
+      if (dl * dl + da * da + db * db < tol2) {
+        isBg = true
+        break
+      }
     }
-    return false
+    bgColorCache.set(key, isBg)
+    return isBg
   }
 
-  // 外周の背景色画素から BFS（背景色でも被写体に囲まれた領域は残る）
+  // 外周の背景色画素から BFS（背景色でも被写体に囲まれた領域は残る）。
+  // visited は enqueue 時に立て、同じ画素を複数回キューに積まない
   const visited = new Uint8Array(w * h)
   const queue: number[] = []
+  const enqueue = (i: number) => {
+    if (!visited[i]) {
+      visited[i] = 1
+      queue.push(i)
+    }
+  }
   for (let x = 0; x < w; x++) {
-    queue.push(x, (h - 1) * w + x)
+    enqueue(x)
+    enqueue((h - 1) * w + x)
   }
   for (let y = 0; y < h; y++) {
-    queue.push(y * w, y * w + w - 1)
+    enqueue(y * w)
+    enqueue(y * w + w - 1)
   }
   const bg = new Uint8Array(w * h)
   while (queue.length > 0) {
     const i = queue.pop()!
-    if (visited[i]) continue
-    visited[i] = 1
     if (!isBgColor(i * 4)) continue
     bg[i] = 1
     const x = i % w
     const y = (i / w) | 0
-    if (x > 0) queue.push(i - 1)
-    if (x < w - 1) queue.push(i + 1)
-    if (y > 0) queue.push(i - w)
-    if (y < h - 1) queue.push(i + w)
+    if (x > 0) enqueue(i - 1)
+    if (x < w - 1) enqueue(i + 1)
+    if (y > 0) enqueue(i - w)
+    if (y < h - 1) enqueue(i + w)
   }
   for (let i = 0; i < w * h; i++) {
     if (bg[i]) out.data[i * 4 + 3] = 0

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { BEAD_DIAMETER_MM, cellCenterMm, gridHeightMm, gridWidthMm } from '../lib/grid'
 import type { Pattern } from '../lib/pattern'
 import { countBeads, emptyCellCount, totalBeads } from '../lib/pattern'
@@ -10,8 +11,11 @@ interface Props {
  * 印刷用の原寸シート。
  * SVG に mm 単位の実寸を指定し、公式イラストシートと同様に
  * 印刷してトレイの下に敷いて使う。倍率100%（実際のサイズ）で印刷すること。
+ *
+ * 常時マウントされる大きな SVG（セル数分のノード）のため memo 化し、
+ * pattern が変わらない再レンダーでは reconcile しない。
  */
-export function PrintSheet({ pattern }: Props) {
+export const PrintSheet = memo(function PrintSheet({ pattern }: Props) {
   const { spec, palette, cells } = pattern
   const gw = gridWidthMm(spec)
   const gh = gridHeightMm(spec)
@@ -108,4 +112,4 @@ export function PrintSheet({ pattern }: Props) {
       </table>
     </div>
   )
-}
+})

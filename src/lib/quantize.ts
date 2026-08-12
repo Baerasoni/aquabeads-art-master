@@ -50,11 +50,22 @@ export interface QuantizeOptions {
   outline?: OutlineOptions
   /** セルを空きマスにする不透明率の下限（デフォルト: 0.35） */
   emptyBelow?: number
+  /** sobelMagnitude(image) の事前計算値。同じ image への再計算を避けたい場合に渡す */
+  edgeMag?: Float32Array
 }
 
 function channelMedian(pixels: RGB[], k: 0 | 1 | 2): number {
-  const v = pixels.map((p) => p[k]).sort((a, b) => a - b)
-  return v[Math.floor(v.length / 2)]
+  // ソートだと 3ch × 全セルで数千回になるため 256 ビンのヒストグラムで求める。
+  // 画素値は 0-255 の整数で、sort 版の sorted[floor(n/2)]（上側中央値）と同じ値を返す
+  const hist = new Uint32Array(256)
+  for (const p of pixels) hist[p[k]]++
+  const mid = pixels.length >> 1
+  let acc = 0
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v]
+    if (acc > mid) return v
+  }
+  return 255
 }
 
 /**
@@ -253,7 +264,7 @@ export function imageToPattern(
   const offY = (image.height - gh * scale) / 2
   const beadR = BEAD_DIAMETER_MM / 2
 
-  const edgeMag = outline ? sobelMagnitude(image) : null
+  const edgeMag = outline ? (options.edgeMag ?? sobelMagnitude(image)) : null
 
   // pass1: 各セルの代表色（空きマスは null）とエッジ密度
   const targets: (RGB | null)[][] = []

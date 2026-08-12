@@ -2,7 +2,7 @@ import type { DeltaEMethod } from '../lib/colorspace'
 import type { GridSpec } from '../lib/grid'
 import { STANDARD_TRAY, totalCells } from '../lib/grid'
 import type { RepColorMethod } from '../lib/quantize'
-import { Segmented, SliderRow, SwitchRow } from './controls'
+import { NumberField, Segmented, SliderRow, SwitchRow } from './controls'
 
 export interface Adjust {
   brightness: number
@@ -50,27 +50,21 @@ export function GridSettings({ spec, onSpec, adjust, onAdjust, options, onOption
         <div className="grid-custom">
           <label>
             列{' '}
-            <input
-              type="number"
+            <NumberField
               min={2}
               max={80}
               value={spec.cols}
-              onChange={(e) =>
-                onSpec({ ...spec, cols: Math.max(2, Math.min(80, Number(e.target.value) || 2)) })
-              }
+              onCommit={(v) => onSpec({ ...spec, cols: v })}
             />
           </label>
           <span>×</span>
           <label>
             行{' '}
-            <input
-              type="number"
+            <NumberField
               min={2}
               max={80}
               value={spec.rows}
-              onChange={(e) =>
-                onSpec({ ...spec, rows: Math.max(2, Math.min(80, Number(e.target.value) || 2)) })
-              }
+              onCommit={(v) => onSpec({ ...spec, rows: v })}
             />
           </label>
         </div>

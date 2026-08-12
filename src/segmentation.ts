@@ -6,27 +6,39 @@
 
 // wasm 専用エントリを使う（デフォルトエントリは WebGPU 用の jsep 版 wasm を要求し、
 // 配置している ort-wasm-simd-threaded.{mjs,wasm}（非 jsep 版）と一致しない）
-import * as ort from 'onnxruntime-web/wasm'
+//
+// ort 本体（ort.wasm.bundle.min.mjs = onnxruntime-web/wasm エントリの配布ファイル）は
+// バンドラを通さず public/ort/ から実行時 import する。proxy=true は「ort を含む
+// モジュール自身」を Worker として再読み込みして推論する仕組みのため、バンドラを通すと
+// 共有ヘルパー経由でアプリ本体チャンクへの import が混入し、Worker 側が document 参照で
+// 落ちる（本番ビルドのみ発症）。public/ort/ の3ファイルは同一バージョンの
+// onnxruntime-web パッケージから一緒に更新すること
+import type { InferenceSession } from 'onnxruntime-web/wasm'
 import type { ImageLike } from './lib/quantize'
+
+type OrtModule = typeof import('onnxruntime-web/wasm')
 
 const MODEL_SIZE = 320
 
-let sessionPromise: Promise<ort.InferenceSession> | null = null
+let sessionPromise: Promise<{ ort: OrtModule; session: InferenceSession }> | null = null
 
-function getSession(): Promise<ort.InferenceSession> {
+function getSession(): Promise<{ ort: OrtModule; session: InferenceSession }> {
   if (!sessionPromise) {
-    // GitHub Pages に COOP/COEP ヘッダーがないためマルチスレッドは使えない
-    ort.env.wasm.numThreads = 1
-    // wasm はバンドル済みモジュールから動的 import されるため、
-    // 相対パスだと assets/ 基準に解決されてしまう。ページ基準の絶対 URL にする
-    const base = new URL(import.meta.env.BASE_URL, document.baseURI).href
-    ort.env.wasm.wasmPaths = `${base}ort/`
-    sessionPromise = fetch(`${base}models/u2netp.onnx`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`モデルの取得に失敗しました (${res.status})`)
-        return res.arrayBuffer()
-      })
-      .then((buf) => ort.InferenceSession.create(buf, { executionProviders: ['wasm'] }))
+    sessionPromise = (async () => {
+      // ページ基準の絶対 URL（相対だと assets/ 基準に解決されてしまう）
+      const base = new URL(import.meta.env.BASE_URL, document.baseURI).href
+      const ort = (await import(/* @vite-ignore */ `${base}ort/ort.wasm.bundle.min.mjs`)) as OrtModule
+      // GitHub Pages に COOP/COEP ヘッダーがないためマルチスレッドは使えない
+      ort.env.wasm.numThreads = 1
+      // 推論を Worker 側で実行し、メインスレッド（UI）を固めない
+      ort.env.wasm.proxy = true
+      ort.env.wasm.wasmPaths = `${base}ort/`
+      const res = await fetch(`${base}models/u2netp.onnx`)
+      if (!res.ok) throw new Error(`モデルの取得に失敗しました (${res.status})`)
+      const buf = await res.arrayBuffer()
+      const session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'] })
+      return { ort, session }
+    })()
     // 失敗したら次回呼び出しで再試行できるようにする
     sessionPromise.catch(() => {
       sessionPromise = null
@@ -71,7 +83,7 @@ function resizeBilinear(
  * 初回はモデル読み込みが入るため数秒かかる。
  */
 export async function segmentSubject(image: ImageLike): Promise<Float32Array> {
-  const session = await getSession()
+  const { ort, session } = await getSession()
 
   // 元画像 → 320×320 に縮小
   const srcCanvas = document.createElement('canvas')
