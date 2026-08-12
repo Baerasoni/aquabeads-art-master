@@ -41,6 +41,20 @@ export function PrintSheet({ pattern }: Props) {
             const { x, y } = cellCenterMm(spec, row, col)
             const cx = x + beadR
             const cy = y + beadR
+            if (idx < 0) {
+              // 空きマス: 位置だけ薄く示す（ビーズは置かない）
+              return (
+                <circle
+                  key={`${row}-${col}`}
+                  cx={cx}
+                  cy={cy}
+                  r={markR}
+                  fill="none"
+                  stroke="#ccc"
+                  strokeWidth="0.1"
+                />
+              )
+            }
             const [r, g, b] = palette[idx].rgb
             const luma = 0.299 * r + 0.587 * g + 0.114 * b
             return (

@@ -40,10 +40,22 @@ export function PatternGrid({ pattern, showCodes }: Props) {
 
     for (let row = 0; row < cells.length; row++) {
       for (let col = 0; col < cells[row].length; col++) {
-        const color = palette[cells[row][col]]
+        const idx = cells[row][col]
         const { x, y } = cellCenterMm(spec, row, col)
         const cx = x + beadR
         const cy = y + beadR
+
+        if (idx < 0) {
+          // 空きマス: 薄いリングだけ描く
+          ctx.beginPath()
+          ctx.arc(cx, cy, beadR * 0.94, 0, Math.PI * 2)
+          ctx.lineWidth = 0.12
+          ctx.strokeStyle = 'rgba(0,0,0,0.07)'
+          ctx.stroke()
+          continue
+        }
+
+        const color = palette[idx]
         const [r, g, b] = color.rgb
 
         ctx.beginPath()

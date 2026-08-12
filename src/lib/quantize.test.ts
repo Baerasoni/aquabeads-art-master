@@ -3,7 +3,7 @@ import { AQUA_PALETTE, beadColorById } from './palette'
 import { STANDARD_TRAY, totalCells } from './grid'
 import type { ImageLike, RepColorMethod } from './quantize'
 import { imageToPattern, representativeColor } from './quantize'
-import { countBeads, isValidPattern, totalBeads } from './pattern'
+import { countBeads, emptyCellCount, isValidPattern, totalBeads } from './pattern'
 
 const METHODS: RepColorMethod[] = ['mean', 'median', 'mode']
 
@@ -155,15 +155,111 @@ describe('imageToPattern', () => {
     expect(counts[0].color.name).toBe('しろ')
   })
 
-  // 透過 PNG の回帰テスト: 透明画素は白背景に合成される（くろビーズ化しない）
-  it('全面透過の画像 → 「くろ」ではなく「しろ」になる', () => {
+  // 透過領域は空きマスになる（くろビーズ化もしろビーズ化もしない）
+  it('全面透過の画像 → 全セルが空きマス', () => {
     const image: ImageLike = {
       width: 50,
       height: 50,
       data: new Uint8ClampedArray(50 * 50 * 4), // 全画素 (0,0,0,0)
     }
-    const counts = countBeads(imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE))
-    expect(counts).toHaveLength(1)
-    expect(counts[0].color.name).toBe('しろ')
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE)
+    expect(isValidPattern(pattern)).toBe(true)
+    expect(totalBeads(pattern)).toBe(0)
+    expect(emptyCellCount(pattern)).toBe(559)
+    expect(countBeads(pattern)).toHaveLength(0)
+  })
+
+  it('中央だけ不透明 → 中央にビーズ、外周は空きマス、集計は置きマスのみ', () => {
+    const image: ImageLike = {
+      width: 110,
+      height: 114,
+      data: new Uint8ClampedArray(110 * 114 * 4),
+    }
+    // 中央 40×40 を「あか」で不透明に
+    for (let y = 37; y < 77; y++) {
+      for (let x = 35; x < 75; x++) {
+        const i = (y * 110 + x) * 4
+        image.data[i] = 231
+        image.data[i + 1] = 0
+        image.data[i + 2] = 18
+        image.data[i + 3] = 255
+      }
+    }
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE)
+    expect(isValidPattern(pattern)).toBe(true)
+    const placed = totalBeads(pattern)
+    expect(placed).toBeGreaterThan(0)
+    expect(placed).toBeLessThan(559)
+    expect(placed + emptyCellCount(pattern)).toBe(559)
+    const counts = countBeads(pattern)
+    expect(counts.reduce((s, c) => s + c.count, 0)).toBe(placed)
+    expect(counts[0].color.name).toBe('あか')
+    // 四隅は空きマス
+    expect(pattern.cells[0][0]).toBe(-1)
+    expect(pattern.cells[25][21]).toBe(-1)
+  })
+
+  it('半透明（alpha 50%）のベタは空きマスにならず白と合成される', () => {
+    const image = solidImage(60, 60, [231, 0, 18])
+    for (let i = 3; i < image.data.length; i += 4) image.data[i] = 128
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE)
+    expect(emptyCellCount(pattern)).toBe(0)
+  })
+})
+
+describe('輪郭ビーズ', () => {
+  it('透明背景上の被写体 → シルエット輪郭が最暗色（くろ）になり、内部は元の色', () => {
+    const image: ImageLike = {
+      width: 110,
+      height: 114,
+      data: new Uint8ClampedArray(110 * 114 * 4),
+    }
+    for (let y = 25; y < 90; y++) {
+      for (let x = 25; x < 90; x++) {
+        const i = (y * 110 + x) * 4
+        image.data[i] = 231
+        image.data[i + 1] = 0
+        image.data[i + 2] = 18
+        image.data[i + 3] = 255
+      }
+    }
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE, {
+      outline: { density: 0.12 },
+    })
+    const counts = countBeads(pattern)
+    const names = counts.map((c) => c.color.name)
+    expect(names).toContain('くろ') // シルエット輪郭
+    expect(names).toContain('あか') // 内部
+    // 内部中心のセル（行12あたり）は輪郭ではなく「あか」
+    const midRow = pattern.cells[12]
+    const midIdx = midRow[Math.floor(midRow.length / 2)]
+    expect(pattern.palette[midIdx].name).toBe('あか')
+  })
+
+  it('エッジのない単色画像に輪郭は出ない', () => {
+    const image = solidImage(200, 200, [231, 0, 18])
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE, {
+      outline: { density: 0.12 },
+    })
+    expect(countBeads(pattern)).toHaveLength(1)
+    expect(countBeads(pattern)[0].color.name).toBe('あか')
+  })
+
+  it('強いエッジのあるセルが輪郭色になる', () => {
+    // 左右2色のくっきり境界 → 境界列のセルが輪郭になる
+    const image = solidImage(220, 226, [231, 0, 18])
+    for (let y = 0; y < 226; y++) {
+      for (let x = 110; x < 220; x++) {
+        const i = (y * 220 + x) * 4
+        image.data[i] = 255
+        image.data[i + 1] = 228
+        image.data[i + 2] = 0
+      }
+    }
+    const pattern = imageToPattern(image, STANDARD_TRAY, AQUA_PALETTE, {
+      outline: { density: 0.08 },
+    })
+    const names = countBeads(pattern).map((c) => c.color.name)
+    expect(names).toContain('くろ')
   })
 })

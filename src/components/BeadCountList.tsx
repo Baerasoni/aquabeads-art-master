@@ -1,5 +1,5 @@
 import type { Pattern } from '../lib/pattern'
-import { countBeads, totalBeads } from '../lib/pattern'
+import { countBeads, emptyCellCount, totalBeads } from '../lib/pattern'
 
 interface Props {
   pattern: Pattern
@@ -8,6 +8,7 @@ interface Props {
 export function BeadCountList({ pattern }: Props) {
   const counts = countBeads(pattern)
   const total = totalBeads(pattern)
+  const empty = emptyCellCount(pattern)
   const max = counts[0]?.count ?? 1
 
   return (
@@ -20,6 +21,11 @@ export function BeadCountList({ pattern }: Props) {
         <span className="count-pill">
           <b>{counts.length}</b> 色
         </span>
+        {empty > 0 && (
+          <span className="count-pill">
+            空きマス <b>{empty}</b>
+          </span>
+        )}
       </div>
       <ul className="count-list">
         {counts.map(({ color, count }) => {

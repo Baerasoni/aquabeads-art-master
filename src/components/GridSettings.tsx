@@ -2,6 +2,7 @@ import type { DeltaEMethod } from '../lib/colorspace'
 import type { GridSpec } from '../lib/grid'
 import { STANDARD_TRAY, totalCells } from '../lib/grid'
 import type { RepColorMethod } from '../lib/quantize'
+import { Segmented, SliderRow, SwitchRow } from './controls'
 
 export interface Adjust {
   brightness: number
@@ -24,56 +25,6 @@ interface Props {
   onOptions: (options: ConvertOptions) => void
 }
 
-function Segmented<T extends string>({
-  value,
-  onChange,
-  items,
-}: {
-  value: T
-  onChange: (v: T) => void
-  items: { value: T; label: string }[]
-}) {
-  return (
-    <div className="segmented" role="group">
-      {items.map((item) => (
-        <button
-          key={item.value}
-          type="button"
-          aria-pressed={value === item.value}
-          onClick={() => onChange(item.value)}
-        >
-          {item.label}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function Slider({
-  label,
-  value,
-  onChange,
-}: {
-  label: string
-  value: number
-  onChange: (v: number) => void
-}) {
-  return (
-    <div className="slider-row">
-      <span>{label}</span>
-      <input
-        type="range"
-        min={40}
-        max={160}
-        value={value}
-        aria-label={label}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
-      <span className="value">{value}%</span>
-    </div>
-  )
-}
-
 const isStandard = (spec: GridSpec) =>
   spec.rows === STANDARD_TRAY.rows && spec.cols === STANDARD_TRAY.cols
 
@@ -84,7 +35,7 @@ export function GridSettings({ spec, onSpec, adjust, onAdjust, options, onOption
 
       <div className="field">
         <div className="field-label">
-          トレイ <small>{totalCells(spec)} ビーズ</small>
+          トレイ <small>{totalCells(spec)} マス</small>
         </div>
         <div className="chip-row">
           <button
@@ -127,20 +78,29 @@ export function GridSettings({ spec, onSpec, adjust, onAdjust, options, onOption
 
       <div className="field">
         <div className="field-label">画像調整</div>
-        <Slider
+        <SliderRow
           label="明るさ"
           value={adjust.brightness}
           onChange={(v) => onAdjust({ ...adjust, brightness: v })}
+          min={40}
+          max={160}
+          suffix="%"
         />
-        <Slider
+        <SliderRow
           label="コントラスト"
           value={adjust.contrast}
           onChange={(v) => onAdjust({ ...adjust, contrast: v })}
+          min={40}
+          max={160}
+          suffix="%"
         />
-        <Slider
+        <SliderRow
           label="彩度"
           value={adjust.saturation}
           onChange={(v) => onAdjust({ ...adjust, saturation: v })}
+          min={40}
+          max={160}
+          suffix="%"
         />
         {(adjust.brightness !== 100 || adjust.contrast !== 100 || adjust.saturation !== 100) && (
           <button
@@ -185,24 +145,12 @@ export function GridSettings({ spec, onSpec, adjust, onAdjust, options, onOption
       </div>
 
       <div className="field">
-        <div className="switch-row">
-          <div>
-            <div className="field-label" style={{ marginBottom: 2 }}>
-              ディザリング
-            </div>
-            <p className="field-hint" style={{ marginTop: 0 }}>
-              少ない色数で階調を表現します（写真向き）
-            </p>
-          </div>
-          <button
-            type="button"
-            className="switch"
-            role="switch"
-            aria-checked={options.dither}
-            aria-label="ディザリング"
-            onClick={() => onOptions({ ...options, dither: !options.dither })}
-          />
-        </div>
+        <SwitchRow
+          label="ディザリング"
+          hint="少ない色数で階調を表現します（写真向き）"
+          checked={options.dither}
+          onChange={(v) => onOptions({ ...options, dither: v })}
+        />
       </div>
     </section>
   )

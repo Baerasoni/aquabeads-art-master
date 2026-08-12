@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { BeadCountList } from './components/BeadCountList'
 import type { Adjust, ConvertOptions } from './components/GridSettings'
 import { GridSettings } from './components/GridSettings'
+import type { IllustOptions } from './components/IllustSettings'
+import { DEFAULT_ILLUST, IllustSettings } from './components/IllustSettings'
 import { ImageDropzone } from './components/ImageDropzone'
 import { PaletteSelector } from './components/PaletteSelector'
 import { PatternGrid } from './components/PatternGrid'
@@ -10,10 +12,19 @@ import { PrintSheet } from './components/PrintSheet'
 import type { GridSpec } from './lib/grid'
 import { STANDARD_TRAY, totalCells } from './lib/grid'
 import { AQUA_PALETTE, DEFAULT_OWNED_IDS } from './lib/palette'
+import {
+  cropToSubject,
+  kuwahara,
+  posterizeKMeans,
+  removeBackgroundSimple,
+} from './lib/preprocess'
+import type { ImageLike, QuantizeOptions } from './lib/quantize'
 import { imageToPattern } from './lib/quantize'
+import { applyMask, segmentSubject } from './segmentation'
 
 const OWNED_KEY = 'aqua.ownedIds'
 const HERO_BEAD_IDS = ['m01', 'm02', 'm03', 'm09', 'm07', 'm06', 'm05', 'm04']
+const MAX_SIZE = 640
 
 function loadOwnedIds(): Set<string> {
   try {
@@ -33,7 +44,7 @@ function loadOwnedIds(): Set<string> {
 export default function App() {
   const [source, setSource] = useState<{ bitmap: ImageBitmap; name: string } | null>(null)
   const [sourceUrl, setSourceUrl] = useState('')
-  const [imageData, setImageData] = useState<ImageData | null>(null)
+  const [imageData, setImageData] = useState<ImageLike | null>(null)
   const [spec, setSpec] = useState<GridSpec>(STANDARD_TRAY)
   const [ownedIds, setOwnedIds] = useState<Set<string>>(loadOwnedIds)
   const [adjust, setAdjust] = useState<Adjust>({ brightness: 100, contrast: 100, saturation: 100 })
@@ -42,36 +53,64 @@ export default function App() {
     repColor: 'median',
     dither: false,
   })
+  const [illust, setIllust] = useState<IllustOptions>(DEFAULT_ILLUST)
   const [showCodes, setShowCodes] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [segError, setSegError] = useState(false)
+  const runId = useRef(0)
 
   // 手持ち色の永続化
   useEffect(() => {
     localStorage.setItem(OWNED_KEY, JSON.stringify([...ownedIds]))
   }, [ownedIds])
 
-  // 画像 + 調整 → ImageData（縮小して処理を軽くする）
+  // 画像 + 調整 + イラスト化 → ImageLike（前処理パイプライン）
   useEffect(() => {
     if (!source) {
       setImageData(null)
       return
     }
-    const { bitmap } = source
-    const MAX = 1000
-    const scale = Math.min(1, MAX / Math.max(bitmap.width, bitmap.height))
-    const w = Math.max(1, Math.round(bitmap.width * scale))
-    const h = Math.max(1, Math.round(bitmap.height * scale))
-    const cv = document.createElement('canvas')
-    cv.width = w
-    cv.height = h
-    const ctx = cv.getContext('2d', { willReadFrequently: true })
-    if (!ctx) return
-    // 透過 PNG 対策の白下地（filter 設定前に敷く）
-    ctx.fillStyle = '#fff'
-    ctx.fillRect(0, 0, w, h)
-    ctx.filter = `brightness(${adjust.brightness}%) contrast(${adjust.contrast}%) saturate(${adjust.saturation}%)`
-    ctx.drawImage(bitmap, 0, 0, w, h)
-    setImageData(ctx.getImageData(0, 0, w, h))
-  }, [source, adjust])
+    const id = ++runId.current
+    const run = async () => {
+      setBusy(true)
+      try {
+        const { bitmap } = source
+        const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height))
+        const w = Math.max(1, Math.round(bitmap.width * scale))
+        const h = Math.max(1, Math.round(bitmap.height * scale))
+        const cv = document.createElement('canvas')
+        cv.width = w
+        cv.height = h
+        const ctx = cv.getContext('2d', { willReadFrequently: true })
+        if (!ctx) return
+        // 透明部分は保持する（空きマスになる）。白下地は敷かない
+        ctx.filter = `brightness(${adjust.brightness}%) contrast(${adjust.contrast}%) saturate(${adjust.saturation}%)`
+        ctx.drawImage(bitmap, 0, 0, w, h)
+        let img: ImageLike = ctx.getImageData(0, 0, w, h)
+
+        if (illust.background === 'auto') {
+          try {
+            const mask = await segmentSubject(img)
+            if (runId.current !== id) return
+            applyMask(img, mask)
+            setSegError(false)
+          } catch {
+            setSegError(true)
+          }
+        } else if (illust.background === 'simple') {
+          img = removeBackgroundSimple(img)
+        }
+        if (illust.background !== 'none' && illust.autoZoom) img = cropToSubject(img)
+        if (illust.smooth) img = kuwahara(img, 2)
+        if (illust.posterize) img = posterizeKMeans(img, illust.colors)
+
+        if (runId.current === id) setImageData(img)
+      } finally {
+        if (runId.current === id) setBusy(false)
+      }
+    }
+    run()
+  }, [source, adjust, illust])
 
   // サムネイル URL
   useEffect(() => {
@@ -89,10 +128,20 @@ export default function App() {
 
   const ownedPalette = useMemo(() => AQUA_PALETTE.filter((c) => ownedIds.has(c.id)), [ownedIds])
 
+  const quantizeOptions = useMemo<QuantizeOptions>(
+    () => ({
+      ...options,
+      outline: illust.outline
+        ? { density: 0.04 + ((100 - illust.outlineStrength) / 100) * 0.16 }
+        : undefined,
+    }),
+    [options, illust.outline, illust.outlineStrength],
+  )
+
   const pattern = useMemo(() => {
     if (!imageData || ownedPalette.length === 0) return null
-    return imageToPattern(imageData, spec, ownedPalette, options)
-  }, [imageData, spec, ownedPalette, options])
+    return imageToPattern(imageData, spec, ownedPalette, quantizeOptions)
+  }, [imageData, spec, ownedPalette, quantizeOptions])
 
   return (
     <>
@@ -152,7 +201,7 @@ export default function App() {
                   <strong>{source.name}</strong>
                   <span>
                     {source.bitmap.width}×{source.bitmap.height}px → {spec.cols}×{spec.rows}（
-                    {totalCells(spec)}ビーズ）
+                    {totalCells(spec)}マス）
                   </span>
                 </div>
                 <button type="button" className="btn btn-ghost" onClick={() => setSource(null)}>
@@ -165,7 +214,13 @@ export default function App() {
                   <section className="card pattern-card reveal" aria-label="図案">
                     <h2>図案</h2>
                     <div className="pattern-frame">
-                      {pattern ? (
+                      {busy && !pattern ? (
+                        <p className="pattern-empty">
+                          {illust.background === 'auto'
+                            ? 'AI が被写体を切り抜いています…'
+                            : '変換中…'}
+                        </p>
+                      ) : pattern ? (
                         <PatternGrid pattern={pattern} showCodes={showCodes} />
                       ) : (
                         <p className="pattern-empty">
@@ -186,6 +241,7 @@ export default function App() {
                         />
                         色番号を表示
                       </label>
+                      {busy && pattern && <span className="pattern-note">更新中…</span>}
                       <span className="pattern-note">
                         ピッチ5.0mm ・ 六角配置 ・ 実寸 {Math.round((spec.cols - 1) * 5 + 5)}mm 幅
                       </span>
@@ -195,6 +251,7 @@ export default function App() {
                 </div>
 
                 <div className="stack">
+                  <IllustSettings options={illust} onChange={setIllust} segError={segError} />
                   <GridSettings
                     spec={spec}
                     onSpec={setSpec}
