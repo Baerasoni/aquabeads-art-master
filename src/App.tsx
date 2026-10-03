@@ -236,8 +236,15 @@ export default function App() {
   // --- おまかせ自動調整 ---
   const [autoRun, setAutoRun] = useState<AutoAdjustRunState | null>(null)
   const [autoNote, setAutoNote] = useState('')
-  const autoWorker = useRef<Worker | null>(null)
-  const autoCancelled = useRef(false)
+  // 各実行が自分の Worker を所有する。キャンセル後に別の実行を始めても、
+  // 古いコールバックが新しい実行の進捗や設定を変更しないよう同一性で判定する。
+  const autoSession = useRef<{ worker: Worker | null } | null>(null)
+
+  useEffect(() => () => {
+    const session = autoSession.current
+    autoSession.current = null
+    session?.worker?.terminate()
+  }, [])
 
   const applyAutoResult = (r: AutoAdjustResult) => {
     const p = r.params
@@ -257,19 +264,28 @@ export default function App() {
   }
 
   const cancelAutoAdjust = () => {
-    autoCancelled.current = true
-    autoWorker.current?.terminate()
-    autoWorker.current = null
+    const session = autoSession.current
+    autoSession.current = null
+    session?.worker?.terminate()
     setAutoRun(null)
   }
 
+  // 入力変更と同じイベント内で無効化する（effect を待つと古い結果が割り込める）。
+  const changeInput = <T,>(setValue: (value: T) => void) => (value: T) => {
+    cancelAutoAdjust()
+    setAutoNote('')
+    setValue(value)
+  }
+
   const applyPreset = (p: Preset) => {
+    cancelAutoAdjust()
     setIllust(p.illust)
     setOptions(p.options)
     setAutoNote('')
   }
 
   const resetAllSettings = () => {
+    cancelAutoAdjust()
     clearSettings()
     setAdjust(DEFAULT_SETTINGS.adjust)
     setIllust(DEFAULT_SETTINGS.illust)
@@ -280,8 +296,13 @@ export default function App() {
 
   const runAutoAdjust = async () => {
     const c = stages.current
-    if (!c.base || autoRun || ownedPalette.length === 0) return
-    autoCancelled.current = false
+    if (
+      !source || !c.base || c.baseSeq !== source.seq ||
+      autoSession.current || ownedPalette.length === 0
+    ) return
+    const session: { worker: Worker | null } = { worker: null }
+    autoSession.current = session
+    const isCurrent = () => autoSession.current === session
     setAutoNote('')
     setAutoRun({ done: 0, total: 1, best: 0 })
 
@@ -293,7 +314,7 @@ export default function App() {
         mask = null
       }
     }
-    if (autoCancelled.current) return
+    if (!isCurrent()) return
 
     // 探索は 320px 縮小で行う（確定後のフル解像度適用は通常パイプラインが行う）
     const searchBase = resizeImage(c.base, 320)
@@ -308,48 +329,61 @@ export default function App() {
       palette: ownedPalette,
     }
     const finish = (r: AutoAdjustResult) => {
-      autoWorker.current = null
-      if (autoCancelled.current) return
+      if (!isCurrent()) return
+      autoSession.current = null
       applyAutoResult(r)
       setAutoRun(null)
     }
-    // Worker が使えない環境ではメインスレッドで実行する（同一関数のフォールバック）
+    // Worker が使えない環境ではメインスレッドで実行する（同一関数のフォールバック）。
+    // エラーメッセージと onerror が両方届いても探索は1回だけ起動する。
+    let fallbackStarted = false
     const runOnMainThread = async () => {
-      const r = await autoAdjust(request.base, request.mask, request.seed, request.spec, request.palette, {
-        onProgress: async (p) => {
-          setAutoRun({ done: p.done, total: p.totalEstimate, best: p.bestScore })
-          await yieldToPaint()
-        },
-        shouldStop: () => autoCancelled.current,
-      })
-      finish(r)
+      if (!isCurrent() || fallbackStarted) return
+      fallbackStarted = true
+      session.worker?.terminate()
+      session.worker = null
+      try {
+        const r = await autoAdjust(request.base, request.mask, request.seed, request.spec, request.palette, {
+          onProgress: async (p) => {
+            if (!isCurrent()) return
+            setAutoRun({ done: p.done, total: p.totalEstimate, best: p.bestScore })
+            await yieldToPaint()
+          },
+          shouldStop: () => !isCurrent(),
+        })
+        finish(r)
+      } catch {
+        if (!isCurrent()) return
+        autoSession.current = null
+        setAutoRun(null)
+        setAutoNote('自動調整に失敗しました。もう一度お試しください。')
+      }
     }
     try {
       const worker = new Worker(new URL('./worker/autoAdjust.worker.ts', import.meta.url), {
         type: 'module',
       })
-      autoWorker.current = worker
+      session.worker = worker
       worker.onmessage = (e: MessageEvent<AutoAdjustMessage>) => {
+        if (!isCurrent() || session.worker !== worker) return
         const msg = e.data
         if (msg.type === 'progress') {
           setAutoRun({ done: msg.done, total: msg.totalEstimate, best: msg.bestScore })
         } else if (msg.type === 'done') {
           worker.terminate()
+          session.worker = null
           finish(msg.result)
         } else {
-          worker.terminate()
-          autoWorker.current = null
-          runOnMainThread()
+          void runOnMainThread()
         }
       }
       worker.onerror = () => {
-        worker.terminate()
-        autoWorker.current = null
-        runOnMainThread()
+        if (!isCurrent() || session.worker !== worker) return
+        void runOnMainThread()
       }
       worker.postMessage(request)
     } catch {
-      runOnMainThread()
+      void runOnMainThread()
     }
   }
 
@@ -402,7 +436,9 @@ export default function App() {
                 })}
               </div>
               <ImageDropzone
-                onImage={(bitmap, name) => setSource({ bitmap, name, seq: ++seqRef.current })}
+                onImage={(bitmap, name) =>
+                  changeInput(setSource)({ bitmap, name, seq: ++seqRef.current })
+                }
               />
             </div>
           ) : (
@@ -416,7 +452,11 @@ export default function App() {
                     {totalCells(spec)}マス）
                   </span>
                 </div>
-                <button type="button" className="btn btn-ghost" onClick={() => setSource(null)}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => changeInput(setSource)(null)}
+                >
                   別の写真にする
                 </button>
               </div>
@@ -472,16 +512,16 @@ export default function App() {
                   >
                     <PresetChips illust={illust} options={options} onApply={applyPreset} />
                   </AutoAdjustButton>
-                  <IllustSettings options={illust} onChange={setIllust} segError={segError} />
+                  <IllustSettings options={illust} onChange={changeInput(setIllust)} segError={segError} />
                   <GridSettings
                     spec={spec}
-                    onSpec={setSpec}
+                    onSpec={changeInput(setSpec)}
                     adjust={adjust}
-                    onAdjust={setAdjust}
+                    onAdjust={changeInput(setAdjust)}
                     options={options}
-                    onOptions={setOptions}
+                    onOptions={changeInput(setOptions)}
                   />
-                  <PaletteSelector ownedIds={ownedIds} onChange={setOwnedIds} />
+                  <PaletteSelector ownedIds={ownedIds} onChange={changeInput(setOwnedIds)} />
                   <button type="button" className="btn-link" onClick={resetAllSettings}>
                     すべての設定をリセット
                   </button>

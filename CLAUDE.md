@@ -63,7 +63,8 @@ Float32Array を runPipeline に渡す。
 - モデル public/models/u2netp.onnx（rembg 配布, U²-Net Apache-2.0）と wasm ランタイム public/ort/ は自前ホスト
 
 - 状態管理は React 標準（useState/useReducer）。状態ライブラリは使わない
-- テストは `lib/` の純関数と `mcp/core.ts` を対象にする。UI コンポーネントのテストは書いていない
+- テストは `lib/` の純関数と `mcp/core.ts` が中心。`src/App.test.tsx` は jsdom + React で
+  おまかせ調整のキャンセル・入力変更・再実行のライフサイクルを検証する（Worker / 推論はモック）
 - 設定（adjust / illust / options / spec）は localStorage `aqua.settings.v1` に永続化
   （lib/settings.ts — 読込時にフィールド単位で検証・既定値補完）
 
